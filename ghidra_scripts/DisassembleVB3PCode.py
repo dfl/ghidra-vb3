@@ -11,10 +11,11 @@
 # no VB source reconstruction (deliberately mirrors pcode.py's design).
 #
 # Usage:
-#   1. Load your VB3 EXE (or raw p-code dump) into Ghidra as a raw binary.
+#   1. Load your VB3 EXE into Ghidra as a raw binary, OR load a raw p-code dump.
 #   2. Run this script via Script Manager.
 #   3. Point it at your VBDIS3 directory when prompted.
-#   4. Enter the hex file offset and byte length of the p-code region.
+#   4. For a VB3 EXE the script auto-detects p-code segments via the NE header.
+#      For a raw dump, enter the hex offset and length when prompted.
 #
 # The script creates a plate comment + label for each detected procedure
 # and an EOL comment on every token line.
@@ -88,11 +89,58 @@ def _get_keyword(tokens, vbdis_string, idx):
 
 
 # ---------------------------------------------------------------------------
+# NE (New Executable) header parser
+# ---------------------------------------------------------------------------
+
+def parse_ne_segments(data):
+    """Parse a VB3 NE executable and return CODE segment list.
+
+    Returns list of dicts: {seg_num, file_off, file_size, flags}
+    Only segments with file data (lsec != 0) are included.
+    """
+    if data[:2] != b"MZ":
+        return None, "Not an MZ executable"
+
+    e_lfanew = struct.unpack_from("<H", data, 0x3C)[0]
+    if e_lfanew + 4 > len(data):
+        return None, "e_lfanew out of range"
+
+    ne_off = e_lfanew
+    if data[ne_off:ne_off + 2] != b"NE":
+        return None, f"Expected NE signature at {ne_off:#x}, got {data[ne_off:ne_off+2]!r}"
+
+    n_segs      = struct.unpack_from("<H", data, ne_off + 0x1C)[0]
+    seg_tbl_off = struct.unpack_from("<H", data, ne_off + 0x22)[0]
+    shift       = struct.unpack_from("<H", data, ne_off + 0x32)[0]
+    sector_size = 1 << shift
+
+    seg_tbl = ne_off + seg_tbl_off
+    segments = []
+    for i in range(n_segs):
+        base = seg_tbl + i * 8
+        lsec, fsize, flags, _ = struct.unpack_from("<HHHH", data, base)
+        if lsec == 0:
+            continue  # no file data (BSS / pure-virtual segment)
+        file_off  = lsec * sector_size
+        file_size = fsize if fsize != 0 else 0x10000
+        is_data   = bool(flags & 0x0001)
+        if not is_data:
+            segments.append({
+                "seg_num": i + 1,
+                "file_off": file_off,
+                "file_size": file_size,
+                "flags": flags,
+            })
+
+    return segments, None
+
+
+# ---------------------------------------------------------------------------
 # Disassembler (port of pcode.py)
 # ---------------------------------------------------------------------------
 
-CASE_START  = 5
-CASE_FINISH = 4
+CASE_START   = 5
+CASE_FINISH  = 4
 CASE_SPECIAL = 8
 
 
@@ -126,6 +174,18 @@ class VB3Disasm:
             "alt9": alt9, "tk_case": tk_case, "flags": flags,
             "num_param": num_param, "low_nibble": tk_case & 0xF, "keyword": kw,
         }
+
+    def probe_pcode(self, file_off, file_size, probe_bytes=0x200):
+        """Quick check: does this segment start with a CASE_START token?"""
+        end = file_off + min(file_size, probe_bytes)
+        off = file_off
+        while off + 2 <= min(end, len(self.data)):
+            tok = struct.unpack_from("<H", self.data, off)[0]
+            d = self.convert_token(tok)
+            if d and d["low_nibble"] == CASE_START:
+                return True
+            off += 2
+        return False
 
     def walk(self, start, end, max_tokens=4000):
         off = start
@@ -176,7 +236,9 @@ class VB3Disasm:
         procs = []
         off = region_start
         while off < region_end:
-            int_tokens = struct.unpack_from("<H", self.data, off)[0] if off + 2 <= len(self.data) else 0
+            if off + 2 > len(self.data):
+                break
+            int_tokens = struct.unpack_from("<H", self.data, off)[0]
             d = self.convert_token(int_tokens)
             if d and d["low_nibble"] == CASE_START:
                 recs = list(self.walk(off, region_end))
@@ -207,33 +269,31 @@ def _fmt_token(rec):
     return f"{rec['kw']:<10} np={rec['np']:>2} {p}{extra}".rstrip()
 
 
-def annotate(program, base_addr, procs):
+def annotate(program, base_addr, all_procs):
     from ghidra.program.model.symbol import SourceType
     listing = program.getListing()
-    addr_factory = program.getAddressFactory()
-    addr_space = addr_factory.getDefaultAddressSpace()
+    addr_space = program.getAddressFactory().getDefaultAddressSpace()
     symbol_table = program.getSymbolTable()
+    total = 0
 
-    for i, recs in enumerate(procs):
-        start_off = recs[0]["off"]
-        addr = addr_space.getAddress(base_addr + start_off)
-
-        # plate comment: procedure number + token count
-        label = f"vb3_proc_{i:04d}"
-        plate = f"VB3 procedure #{i}  ({len(recs)} tokens)"
-        existing = listing.getCodeUnitAt(addr)
-        if existing:
-            existing.setComment(existing.PLATE_COMMENT, plate)
-        symbol_table.createLabel(addr, label, SourceType.ANALYSIS)
-
-        # EOL comment on each token
-        for rec in recs:
-            tok_addr = addr_space.getAddress(base_addr + rec["off"])
-            cu = listing.getCodeUnitAt(tok_addr)
+    for seg_label, procs in all_procs:
+        for i, recs in enumerate(procs):
+            start_off = recs[0]["off"]
+            addr = addr_space.getAddress(base_addr + start_off)
+            label = f"{seg_label}_proc_{i:04d}"
+            plate = f"VB3 {seg_label} procedure #{i}  ({len(recs)} tokens)"
+            cu = listing.getCodeUnitAt(addr)
             if cu:
-                cu.setComment(cu.EOL_COMMENT, _fmt_token(rec))
+                cu.setComment(cu.PLATE_COMMENT, plate)
+            symbol_table.createLabel(addr, label, SourceType.ANALYSIS)
+            for rec in recs:
+                tok_addr = addr_space.getAddress(base_addr + rec["off"])
+                cu = listing.getCodeUnitAt(tok_addr)
+                if cu:
+                    cu.setComment(cu.EOL_COMMENT, _fmt_token(rec))
+            total += 1
 
-    return len(procs)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +301,6 @@ def annotate(program, base_addr, procs):
 # ---------------------------------------------------------------------------
 
 def main():
-    # Ask for VBDIS3 directory
     vbdis_dir = askDirectory("Select VBDIS3 directory (contains vbdis3i.dat)", "OK").getAbsolutePath()
     if not os.path.exists(os.path.join(vbdis_dir, "vbdis3i.dat")):
         popup("vbdis3i.dat not found in selected directory. Aborting.")
@@ -259,46 +318,60 @@ def main():
     byte_buf = jpype.JByte[total_len]
     mem.getBytes(min_addr, byte_buf)
     data = bytes([(b + 256) % 256 for b in byte_buf])
-
-    base_addr = int(str(min_addr), 16) if str(min_addr).startswith("0") else min_addr.getOffset()
-
-    # Ask for p-code region
-    region_hex = askString(
-        "P-code region",
-        f"Enter hex file offset and byte length, e.g.  34a00 f800\n"
-        f"(Program spans {hex(base_addr)}..{hex(base_addr + total_len - 1)})",
-    )
-    parts = region_hex.strip().split()
-    if len(parts) != 2:
-        popup("Expected two hex values: <offset> <length>. Aborting.")
-        return
-    region_start = int(parts[0], 16)
-    region_len   = int(parts[1], 16)
-    region_end   = region_start + region_len
-
-    if region_end > len(data):
-        popup(f"Region {hex(region_start)}+{hex(region_len)} exceeds program size {hex(len(data))}. Aborting.")
-        return
+    base_addr = min_addr.getOffset()
 
     println(f"Loading token tables from {vbdis_dir} ...")
     disasm = VB3Disasm(vbdis_dir, data)
     println(f"Loaded {len(disasm.tokens)} opcodes.")
 
-    println(f"Scanning {hex(region_start)}..{hex(region_end)} for procedures ...")
-    procs = disasm.find_procedures(region_start, region_end)
-    println(f"Found {len(procs)} coherent procedures.")
+    # Try NE auto-detect
+    segments, err = parse_ne_segments(data)
+    regions = []  # list of (label, file_off, file_size)
 
-    if not procs:
+    if segments is not None:
+        println(f"NE header found: {len(segments)} CODE segments.")
+        pcode_segs = [s for s in segments if disasm.probe_pcode(s["file_off"], s["file_size"])]
+        println(f"Probed {len(segments)} CODE segments, {len(pcode_segs)} look like p-code.")
+        for s in pcode_segs:
+            label = f"seg{s['seg_num']:02d}"
+            regions.append((label, s["file_off"], s["file_off"] + s["file_size"]))
+            println(f"  {label}: {s['file_off']:#x} .. {s['file_off'] + s['file_size']:#x}")
+    else:
+        println(f"NE auto-detect: {err}. Falling back to manual region entry.")
+
+    if not regions:
+        region_hex = askString(
+            "P-code region",
+            f"Enter hex file offset and byte length, e.g.  34a00 f800\n"
+            f"(Program spans {hex(base_addr)}..{hex(base_addr + total_len - 1)})",
+        )
+        parts = region_hex.strip().split()
+        if len(parts) != 2:
+            popup("Expected two hex values: <offset> <length>. Aborting.")
+            return
+        rstart = int(parts[0], 16)
+        rlen   = int(parts[1], 16)
+        if rstart + rlen > len(data):
+            popup(f"Region exceeds program size {hex(len(data))}. Aborting.")
+            return
+        regions.append(("manual", rstart, rstart + rlen))
+
+    println("Scanning for procedures ...")
+    all_procs = []
+    for label, rstart, rend in regions:
+        procs = disasm.find_procedures(rstart, rend)
+        println(f"  {label}: {len(procs)} procedures")
+        if procs:
+            all_procs.append((label, procs))
+
+    total_procs = sum(len(p) for _, p in all_procs)
+    if total_procs == 0:
         popup("No coherent procedures found. Check region offsets and token tables.")
         return
 
-    println("Annotating listing ...")
-    n = annotate(program, base_addr, procs)
-    println(f"Done — annotated {n} procedures.")
-    for i, recs in enumerate(procs[:5]):
-        println(f"  proc {i:04d} @ {hex(recs[0]['off'])}  ({len(recs)} tokens)")
-    if len(procs) > 5:
-        println(f"  ... ({len(procs) - 5} more)")
+    println(f"Annotating {total_procs} procedures ...")
+    n = annotate(program, base_addr, all_procs)
+    println(f"Done — annotated {n} procedures across {len(all_procs)} segment(s).")
 
 
 main()
