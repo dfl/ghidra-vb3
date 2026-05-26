@@ -15,15 +15,13 @@ inference, no VB source reconstruction.
 ## Requirements
 
 - Ghidra 11.x with PyGhidra enabled
-- [VBDIS3](https://www.btinternet.com/~dodi/VBDIS3.zip) — only the two token
-  table files are needed: `vbdis3i.dat` and `vbdis3x.dat`
 
 ## Usage
 
 1. Load your VB3 EXE into Ghidra as a **Raw Binary**.
 2. Open the Script Manager and add this repo's `ghidra_scripts/` directory.
 3. Run `DisassembleVB3PCode.py`.
-4. Select the directory containing `vbdis3i.dat` / `vbdis3x.dat` when prompted.
+4. The token tables (`vbdis3i.dat` / `vbdis3x.dat`) are included in `ghidra_scripts/` — no separate download needed.
 
 The script auto-detects p-code segments from the NE header. If the file is not
 a standard NE executable (e.g. a raw p-code dump), it falls back to prompting
@@ -39,10 +37,9 @@ decode logic is a Python port of `MODULE11.BAS` (`ConvertToken` / `ScanTokens`).
 
 The scripts in this repository are released under the [MIT License](LICENSE).
 
-The VBDIS3 token tables (`vbdis3i.dat`, `vbdis3x.dat`) are copyright DoDi and
-are **not** included here. They must be downloaded separately from the VBDIS3
-archive linked above. No license was stated by the author; they are used here
-only as an external data dependency.
+The VBDIS3 token tables (`vbdis3i.dat`, `vbdis3x.dat`) are copyright DoDi
+(Hans Dietrich Doebener) and are included here with attribution. No explicit
+license was stated by the author.
 
 ## Status
 
