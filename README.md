@@ -35,6 +35,15 @@ Token tables are from [VBDIS3](https://www.btinternet.com/~dodi/VBDIS3.zip) by
 DoDi (Hans Dietrich Doebener), the reference VB3 p-code disassembler. The core
 decode logic is a Python port of `MODULE11.BAS` (`ConvertToken` / `ScanTokens`).
 
+## License
+
+The scripts in this repository are released under the [MIT License](LICENSE).
+
+The VBDIS3 token tables (`vbdis3i.dat`, `vbdis3x.dat`) are copyright DoDi and
+are **not** included here. They must be downloaded separately from the VBDIS3
+archive linked above. No license was stated by the author; they are used here
+only as an external data dependency.
+
 ## Status
 
 Script (Phase 1). A Java loader with full NE integration (Phase 2) and a
