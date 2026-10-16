@@ -11,18 +11,42 @@ annotates the Ghidra listing with:
   are named from the form and control event tables (`Form10.Command1_Click`,
   with VB3's parameter list); other procedures get vb3dec's names
   (`sub0D5C`, `fn13EB`), qualified by their form in form modules. The plate
-  shows the `Sub`/`Function` header, the form, and the procedures that call it.
+  shows the `Sub`/`Function` header, the form, the procedures that call it, and
+  the parameters, locals and `Static` variables with their types and frame
+  offsets (`Dim l0A6A As Integer  ' bp-0x1a`).
   Bytes no descriptor covers (or a raw p-code dump) are scanned for
   START..FINISH runs, labeled `seg08_proc_0000` etc.
 - An EOL comment on every token: opcode keyword, parameter count, raw param
-  bytes, a VBDIS3-style variable annotation (`gv1780%`) plus the form,
-  control, `Screen` or `Clipboard` a module slot names (`[mv10eT List2]`),
-  block indentation, and a best-effort infix expression on operators.
+  bytes, a VBDIS3-style variable annotation (`gv1780%`), the form, control,
+  `Screen` or `Clipboard` a module slot names (`[mv10eT List2]`), the
+  variable and its type (`l0A6A:Integer`), block indentation, and a
+  best-effort infix expression on operators.
 - Resolved call targets, both `Call` statements and function calls in
   expressions: `->fn13EB@0x2fe02` for local procedures (also added as a call
   reference, so Ghidra's cross-references work) and `->vbprint.dll:moveypos`
   for external `Declare` functions. `Declare` parameter lists, which compiled
   programs do not keep, are inferred from the arguments each call pushes.
+
+### Variable types
+
+Variables are identified by storage: frame locals and parameters by their
+module data slot (whose word is the frame offset), module and `Static`
+variables by slot, and globals by their offset in the global data area, which
+is the same in every module. Types come from two kinds of evidence, which are
+never mixed silently:
+
+- **recorded**: the data type each reference's control token says the opcode
+  accesses, array descriptors in module data, and `ReDim ... As` clauses;
+- **inferred** (shown with `~`): usage rules from vb3dec, each named in the
+  JSON evidence: scalar assignments, `Len`/`Asc`/`Mid$`/`Left$`/`Right$`/`InStr`
+  arguments, comparisons with Long literals, event signatures and call-site
+  argument types.
+
+Disagreeing evidence is reported as a conflict; no evidence leaves the type
+unknown (`?`) rather than defaulting to Variant. `Static` locals and module
+variables share module data, so a module variable used by one procedure is
+listed in its plate as a `Static` candidate. `tests/vb3/` holds a ground-truth
+program for measuring this against declared types.
 
 Scope is intentionally limited to **opcode + params per token**, with call
 resolution and light structuring on top. It does not reconstruct VB source.
@@ -74,15 +98,21 @@ python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --proc 0x13966   # 
   found) and warnings.
 - `forms`: each form's `name`, `file_name`, code `module` and `controls` (`id`, `name`,
   `type`, `array_index`), with decoding `warnings`.
+- `variables`: `id`, `name`, `storage` (`local`, `param`, `module`, `global`), `module`,
+  `slot`, `frame`, `slot_word`, `global_offset`, `array`, `bounds`, `type`, `type_source`
+  (`recorded`, `inferred`, `conflict` or `null`), `evidence` (recorded types with
+  reference counts, inferred types with rule names) and `procedures`.
 - `subs`: the Sub table (`index`, `kind`, `local`, `module`, `segment`, `code_start`,
   `code_end`, `lib`, `alias`, `name`, `returns`, `params` (`null` when unknown), `event`
   (`owner`, `event`, `slot`; `event` is `null` when the control's model is missing),
   `declaration`). With `--proc`, only Subs the procedure owns or calls.
 - `procedures`: `start`/`end` file offsets, owning `sub`, `calls` (token offset and
-  callee Sub index, `null` when unresolved), `callers`, and unless `--summary`, `tokens`
+  callee Sub index, `null` when unresolved), `callers`, `variables` (ids), and unless
+  `--summary`, `tokens`
   (`offset`, `size`, `token`, `keyword`, `params` hex, `level`, and when known `int`,
-  `string`, `var`, `ref`, `callee`, `expr`).
-- `coverage`: totals versus returned counts and the number of unresolved calls.
+  `string`, `var`, `ref`, `variable`, `callee`, `expr`).
+- `coverage`: totals versus returned counts, the number of unresolved calls, and variables
+  by type source.
 
 All offsets are 0-based file offsets. JSON strings are decoded as latin1, so every
 byte is preserved; Ghidra comments and the text output show them as Windows-1252,

@@ -277,14 +277,6 @@ class VB3GlobalData:
             return None
         return struct.unpack_from("<H", mod, offset)[0]
 
-    def module_locals(self, mod_id):
-        """gLocalVarsTypeArrExE for a module: (int16 array, count)."""
-        mod = self.modules.get(mod_id)
-        if not mod or len(mod) < 4:
-            return [], 0
-        arr = list(struct.unpack_from(f"<{len(mod) // 2}h", mod))
-        return arr, len(arr) - 1
-
 
 # ---------------------------------------------------------------------------
 # Control models: the Control Development Kit MODEL, PROPINFO and EVENTINFO
@@ -847,78 +839,22 @@ def decode_form(data, ref, models):
 
 
 # ---------------------------------------------------------------------------
-# Type inference — simplified ProcessType / SetType1 / SetType2
-#
-# We bypass gvConv_bw (always zero in the available source) and derive the
-# type suffix directly from pToken1/pToken2 (control_token bytes).
-#
-# pToken1 (from control_token[tok]) encodes the storage class / variable kind:
-#   8  = plain Integer-typed reference
-#   9  = Object / module-level
-#   10 = Array element
-#   11 = Dynamic variable
-#   12 = Static variable
-#   14 = Long/String/user-type (pToken2 gives specifics)
-#
-# pToken2 (from control_token[tok+1]) encodes the VB type suffix (gc117C index):
-#   directly 2..7: '%', '&', '!', '#', '@', 'v'
-#   8 (mc0162): no suffix
-#   9 (mc0164): user type 'T'
-#   10 (mc015A): complex (array of user-type)
-#   12 (mc015C): special string/Long marker
-#   13 (mc0166): fixed-length string '*' (gTypeFixString=8 → gc117C[8]='O' — but in practice '*')
+# VBDIS3 annotation tables (MAIN.bas): variable kind letters and type suffixes
 # ---------------------------------------------------------------------------
 
 # gc114A = "?pmlgcfOTas"   (1-indexed: 1='p' 2='m' 3='l' 4='g' 5='c' 6='f' 7='O' 8='T' 9='a' 10='s')
 GC114A = "?pmlgcfOTas"
-# gc117C = "t%&!#@vOT*A$4|"  (1-indexed)
-GC117C = "t%&!#@vOT*A$4|"
 
-# pToken2 → gc117C index (type suffix)
-_PT2_SUFFIX = {2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 9: 9, 10: 10, 12: 12, 13: 8}
-
-
-def _ptoken_type_suffix(pToken2):
-    """Return the gc117C-index type char for pToken2, or '' if none."""
-    idx = _PT2_SUFFIX.get(pToken2, 0)
-    if 1 <= idx <= len(GC117C):
-        return GC117C[idx - 1]
-    return ""
+# Control token kind -> annotation suffix. Kinds 1..7 are the VB3 data type
+# codes Integer, Long, Single, Double, Currency, Variant, String; 'v' marks
+# Variant as in VBDIS3, which has no Basic type character.
+KIND_SUFFIX = {1: "%", 2: "&", 3: "!", 4: "#", 5: "@", 6: "v", 7: "$",
+               9: "O", 10: "*"}   # object reference, array
 
 
-class TypeState:
-    """Per-procedure type inference state."""
-    __slots__ = ("buf", "arr", "count")
-
-    def __init__(self, count, arr):
-        self.buf   = bytearray(count + 2)  # 1-indexed, like gLocalVarsTypeBuff
-        self.arr   = arr                   # gLocalVarsTypeArrExE
-        self.count = count
-
-    def process_type(self, var_offset, pToken1, pToken2):
-        """Simplified ProcessType — scalar cases only."""
-        if pToken1 < 8:
-            return
-        VarIndex = (var_offset & 0xFFFF) // 2
-        if VarIndex == 0 or VarIndex > self.count or VarIndex >= len(self.buf):
-            return
-        if self.buf[VarIndex]:
-            return  # already typed
-        # map pToken1 → high-bits type category, pToken2 → low-bits type
-        type_hi = {8: 0x80, 9: 0x60, 10: 0xA0, 11: 0x40, 12: 0x20}.get(pToken1, 0)
-        type_lo = pToken2 if pToken2 < 8 else 0
-        self.buf[VarIndex] = (type_hi | type_lo) & 0xFF
-
-    def get_type_char(self, VarIndex):
-        """Return (kind_char, type_suffix_char) from buf[VarIndex]."""
-        if VarIndex <= 0 or VarIndex >= len(self.buf):
-            return "?", ""
-        v = self.buf[VarIndex]
-        if v == 0:
-            return "?", ""
-        type_lo = v & 0x07
-        suffix = _ptoken_type_suffix(type_lo) if type_lo else ""
-        return "v", suffix
+def _ptoken_type_suffix(kind):
+    """Type suffix for a variable reference's control token kind, or ''."""
+    return KIND_SUFFIX.get(kind, "")
 
 
 # ---------------------------------------------------------------------------
@@ -987,6 +923,7 @@ class VB3Disasm:
         return {
             "alt9": alt9, "tk_case": tk_case, "flags": flags,
             "num_param": num_param, "low_nibble": tk_case & 0xF, "keyword": kw,
+            "bit_fwd2": _signed16(flags & 0xF000) // 0x1000,   # argument count of some functions
         }
 
     def probe_pcode(self, file_off, file_size, probe_bytes=0x200):
@@ -1023,14 +960,13 @@ class VB3Disasm:
         l01BA = ft2[ptr] if ptr < len(ft2) else 0
         return l01B4, l01BA, b2
 
-    def _ft2_annotation(self, rec, type_state=None):
+    def _ft2_annotation(self, rec):
         """
         Build a VBDIS3-style variable annotation for a token record.
         Returns a string like 'gv1780%' or '' if no variable reference.
 
-        Uses flag_token2 for kind (gc114A char) and VarIndex from params.
-        Uses TypeState.get_type_char() for the type suffix if available.
-        Falls back to control_token pToken2 otherwise.
+        Uses flag_token2 for kind (gc114A char), VarIndex from params and the
+        control token's kind for the type suffix.
         """
         tok = rec["tok"]
         l01B4, _l01BA, l01BC = self._ft2_lookup(tok)
@@ -1054,26 +990,19 @@ class VB3Disasm:
         if not kind_char and var_index is None:
             return ""
 
-        # Type suffix
-        type_suffix = ""
-        if type_state is not None and var_index is not None:
-            _, type_suffix = type_state.get_type_char(var_index)
-        if not type_suffix:
-            # Fall back to control_token pToken2
-            ct2 = self.control_token[tok + 1] if tok + 1 < len(self.control_token) else 0
-            type_suffix = _ptoken_type_suffix(ct2)
+        # Type suffix from the control token's kind
+        ct2 = self.control_token[tok + 1] if tok + 1 < len(self.control_token) else 0
+        type_suffix = _ptoken_type_suffix(ct2)
 
         slot_hex = f"{(var_index * 2):x}" if var_index is not None else "?"
         access = "a" if (l01BC == 4) else "v"  # gc116E=4 = array element
         return f"{kind_char}{access}{slot_hex}{type_suffix}"
 
-    def walk(self, start, end, max_tokens=4000, type_state=None, stop_at_finish=True):
+    def walk(self, start, end, max_tokens=4000, stop_at_finish=True):
         """
         Yield decoded tokens until end, a FINISH token (unless stop_at_finish
         is False), or a decode failure. Each record includes:
           'ann': type annotation string (VBDIS3 M26A6 style), may be ''
-        If type_state is provided, annotations use its gLocalVarsTypeBuff;
-        the walk also calls process_type() to build the state incrementally.
         """
         off = start
         n = 0
@@ -1103,14 +1032,7 @@ class VB3Disasm:
                 "str": inline_str, "cval": cval, "ann": "", "end": next_off,
             }
 
-            # Type inference pass (incremental)
-            if type_state is not None and (d["flags"] & MASK_LOCALVAR) and len(params) >= 2:
-                var_off = struct.unpack_from("<H", params, len(params) - 2)[0]
-                ct1 = self.control_token[int_tokens] if int_tokens < len(self.control_token) else 0
-                ct2 = self.control_token[int_tokens + 1] if int_tokens + 1 < len(self.control_token) else 0
-                type_state.process_type(var_off, ct1, ct2)
-
-            rec["ann"] = self._ft2_annotation(rec, type_state)
+            rec["ann"] = self._ft2_annotation(rec)
 
             yield rec
             n += 1
@@ -1167,7 +1089,7 @@ class VB3Disasm:
             memo[o] = (finished, n - i + tail)
         return memo.get(start, (False, 0))
 
-    def find_procedures(self, region_start, region_end, type_state=None, max_tokens=4000):
+    def find_procedures(self, region_start, region_end, max_tokens=4000):
         """Scan a region for coherent START..FINISH procedure runs of at most
         max_tokens tokens (walk()'s default cap)."""
         procs = []
@@ -1180,7 +1102,7 @@ class VB3Disasm:
             if d and d["low_nibble"] == CASE_START:
                 finished, count = memo[off] if off in memo else self._scan(off, region_end, memo)
                 if finished and count <= max_tokens:
-                    recs = list(self.walk(off, region_end, type_state=type_state))
+                    recs = list(self.walk(off, region_end))
                     procs.append(recs)
                     off = recs[-1]["off"] + 2
                     continue
@@ -1583,25 +1505,248 @@ ARITH_OPS = {"+", "-", "*", "/", "\\", "Mod", "=", "<>", "<", ">", "<=", ">=",
              "And", "Or", "Xor", "Eqv", "Imp"}
 
 
+# ---------------------------------------------------------------------------
+# Variables and their types
+#
+# Each variable reference names a module data slot. Its control token records
+# the addressing mode (local frame, module data, global data, parameter, array
+# header) and the data type the opcode accesses; for frame variables the slot
+# holds the frame offset (negative = local, positive = parameter; String
+# locals keep a descriptor word there instead, odd or zero), and for
+# globals the offset into the global data area, which identifies the variable
+# across modules. Those are recorded facts. Variables whose references record
+# no type get types inferred from use, following vb3dec's rules (pkg/pcode
+# disasm.go, MIT License, Copyright (c) 2026 Jamie McPeek); every inferred
+# type names the rule that produced it.
+# ---------------------------------------------------------------------------
+
+CTL_MODE_LOCAL = 8
+CTL_MODE_MODULE = 9
+CTL_MODE_GLOBAL = 10
+CTL_MODE_PARAM = 11
+CTL_MODE_ARRAY_HEADER = 12
+CTL_KIND_OBJECT = 9
+CTL_KIND_ARRAY = 10
+CTL_KIND_CALL = 12
+STRING_TYPE_CODE = 7   # (flag token >> 10) & 7 of a String reference
+GLOBAL_ARRAY_ELEMENT = 0xC000
+STRING_ARG_FUNCS = {"Len": 1, "Asc": 1, "Mid$": 0, "Left$": 0, "Right$": 0, "InStr": 0}
+
+
+def _signed(w):
+    return w - 0x10000 if w >= 0x8000 else w
+
+
+def array_descriptor(mod, slot):
+    """(element type or None, [(lower, upper)]) of a module data array
+    descriptor at slot, or None. Port of vb3dec parseModuleVarBounds."""
+    words = [_seg_word(mod, i) for i in range(0, len(mod) - 1, 2)]
+    p = slot // 2 + 3
+    if p >= len(words) or p < 2:
+        return None
+    w1, w2 = words[p - 1], words[p - 2]
+    if w1 & 0xFFC0 in (0xC000, 0xC500, 0xC600, 0x4600):
+        dims = 0
+    elif w1 & 0xFFC0 in (0xC100, 0xC200):
+        dims = w2 & 0xFF if w2 & 0x4000 else 0
+    else:
+        dims = words[p + 2] & 0xFF if p + 2 < len(words) and words[p + 2] & 0x7FC0 == 0x5000 else 0
+    if dims <= 0:
+        return None
+    bounds = []
+    p += 6
+    for _ in range(dims):
+        if p + 1 >= len(words):
+            break
+        count, base = words[p], words[p + 1]
+        bounds.insert(0, (base, count + base - 1))
+        p += 2
+    return DATA_TYPES.get(w1 & 7), bounds
+
+
+class Variable:
+    __slots__ = ("id", "key", "storage", "slot", "slot_word", "module", "frame", "global_offset",
+                 "array", "bounds", "recorded", "inferred", "procs", "name")
+
+    def __init__(self, key, storage, slot, module=None, frame=None, global_offset=None, slot_word=None):
+        self.id = None
+        self.key, self.storage, self.slot, self.module = key, storage, slot, module
+        self.frame, self.global_offset, self.slot_word = frame, global_offset, slot_word
+        self.array = False
+        self.bounds = None     # [(lower, upper)] per dimension, when recorded
+        self.recorded = {}     # type -> reference count
+        self.inferred = {}     # type -> set of rule names
+        self.procs = set()
+        prefix = {"local": "l", "param": "p", "module": "m", "global": "gv"}[storage]
+        self.name = f"{prefix}{(global_offset if storage == 'global' else slot):04X}"
+
+    def record(self, typ):
+        self.recorded[typ] = self.recorded.get(typ, 0) + 1
+
+    def infer(self, typ, rule):
+        if typ:
+            self.inferred.setdefault(typ, set()).add(rule)
+
+    @property
+    def type_source(self):
+        evidence = self.recorded or self.inferred
+        if not evidence:
+            return None
+        if len(evidence) > 1:
+            return "conflict"
+        return "recorded" if self.recorded else "inferred"
+
+    @property
+    def type(self):
+        source = self.type_source
+        if source in ("recorded", "inferred"):
+            return next(iter(self.recorded or self.inferred))
+        return None
+
+
+class VariableTable:
+    """Variables referenced by the decoded procedures, keyed by storage identity."""
+
+    def __init__(self, subs, disasm, procs):
+        self.subs, self.disasm = subs, disasm
+        self.vars = {}
+        self.by_proc = {}
+        for recs in procs:
+            owner = subs.proc_sub(recs)
+            start = recs[0]["off"]
+            seen = self.by_proc.setdefault(start, [])
+            as_type = None   # "As <type>" clause of a ReDim, recorded before its array reference
+            for rec in recs:
+                kw = (rec.get("kw") or "").strip()
+                if kw == "As" and rec["str"] is None and len(rec["params"]) >= 2:
+                    as_type = DATA_TYPES.get(struct.unpack_from("<H", rec["params"])[0])
+                elif kw in ("nl", "eos") or kw.startswith("ReDim"):
+                    as_type = None
+                v = self._reference(rec, owner, start)
+                if v is None:
+                    continue
+                if as_type and v.array:
+                    v.record(as_type)
+                    as_type = None
+                rec["var"] = v
+                v.procs.add(start)
+                if v not in seen:
+                    seen.append(v)
+        for v in self.vars.values():
+            if v.array and v.storage == "module":
+                desc = array_descriptor(subs.globals.modules.get(v.module, b""), v.slot)
+                if desc is not None:
+                    elem, v.bounds = desc
+                    if elem:
+                        v.record(elem)
+        for i, v in enumerate(sorted(self.vars.values(), key=lambda v: str(v.key)), 1):
+            v.id = i
+
+    def _reference(self, rec, owner, start):
+        slot = _var_slot(self.disasm, rec)
+        if slot is None or owner is None or rec.get("ref") or rec.get("callee") is not None:
+            return None
+        ct = self.disasm.control_token
+        tok = rec["tok"]
+        if tok + 1 >= len(ct):
+            return None
+        mode, kind = ct[tok], ct[tok + 1]
+        if kind == CTL_KIND_CALL:
+            return None
+        word = self.subs.globals.module_word(owner.module, slot)
+        if mode == CTL_MODE_GLOBAL:
+            if word is None:
+                return None
+            v = self._get(("global", word), "global", slot, global_offset=word)
+        elif mode == CTL_MODE_MODULE:
+            v = self._get(("module", owner.module, slot), "module", slot, module=owner.module)
+        elif mode in (CTL_MODE_LOCAL, CTL_MODE_PARAM, CTL_MODE_VALUE4):
+            frame = _signed(word) if word is not None else None
+            if frame is None or frame == 0 or frame & 1:
+                frame = None   # not a frame offset (String locals keep a descriptor word)
+            storage = "param" if frame is not None and frame > 0 else "local"
+            v = self._get(("frame", start, slot), storage, slot, module=owner.module,
+                          frame=frame, slot_word=word)
+        elif mode == CTL_MODE_ARRAY_HEADER:
+            known = self.vars.get(("global", word))
+            if known is not None:
+                v = known
+            elif word is not None and _signed(word) < 0 and not word & 1:
+                v = self._get(("frame", start, slot), "local", slot, module=owner.module,
+                              frame=_signed(word), slot_word=word)
+            else:
+                v = self._get(("module", owner.module, slot), "module", slot, module=owner.module)
+            v.array = True
+            return v
+        else:
+            return None
+        if kind == CTL_KIND_ARRAY:
+            v.array = True
+            if v.storage == "global":
+                elem = self.subs.globals.module_word(owner.module, slot + 4)
+                if elem is not None and elem & GLOBAL_ARRAY_ELEMENT == GLOBAL_ARRAY_ELEMENT and DATA_TYPES.get(elem & 7):
+                    v.record(DATA_TYPES[elem & 7])
+        elif kind == CTL_KIND_OBJECT:
+            v.record("Object")
+        elif 1 <= kind <= 7:
+            v.record(DATA_TYPES[kind])
+        else:
+            alt = self.disasm.flag_token[tok // 3] if tok // 3 < len(self.disasm.flag_token) else 0
+            if (alt >> 10) & 7 == STRING_TYPE_CODE:
+                v.record("String")
+        return v
+
+    def _get(self, key, storage, slot, **kw):
+        v = self.vars.get(key)
+        if v is None:
+            v = self.vars[key] = Variable(key, storage, slot, **kw)
+        return v
+
+    def params(self, start):
+        """Parameter variables of a procedure in declaration order (Pascal
+        calling convention: the first parameter has the highest frame offset)."""
+        ps = [v for v in self.by_proc.get(start, ()) if v.storage == "param"]
+        return sorted(ps, key=lambda v: -v.frame)
+
+
 class _StackItem:
-    __slots__ = ("typ", "coerced", "by_ref", "c_string")
+    __slots__ = ("typ", "coerced", "by_ref", "c_string", "var", "long_literal")
 
-    def __init__(self, typ="", by_ref=False):
-        self.typ, self.coerced, self.by_ref, self.c_string = typ, "", by_ref, False
+    def __init__(self, typ="", by_ref=False, var=None):
+        self.typ, self.coerced, self.by_ref, self.c_string = typ, None, by_ref, False
+        self.var, self.long_literal = var, False
+
+    @property
+    def value_type(self):
+        """Type of the value: its coercion target, "" when coerced to an unknown type."""
+        return self.typ if self.coerced is None else self.coerced
 
 
-def infer_declares(subs, disasm, procs):
-    """Simulate the expression stack at every call to an external procedure
-    and set sub.params from the arguments pushed (run after build_call_graph)."""
+def _words(rec):
+    if rec["str"] is not None:
+        return []
+    p = rec["params"]
+    return [struct.unpack_from("<H", p, i)[0] for i in range(0, len(p) - 1, 2)]
+
+
+def simulate(subs, disasm, procs, variables):
+    """One pass over every procedure with a typed expression stack. Infers
+    Declare parameter lists from the arguments each call pushes, and variable
+    types from use. Run after build_call_graph."""
     calls = {}
+    local_args = {}   # callee sub index -> [[arg value types]]
     for recs in procs:
         stack = []
         arg_bytes = -1
+
+        def pop():
+            return stack.pop() if stack else _StackItem()
+
         for rec in recs:
             kw = (rec.get("kw") or "").strip()
             tok = rec["tok"]
-            words = [struct.unpack_from("<H", rec["params"], i)[0]
-                     for i in range(0, len(rec["params"]) - 1, 2)] if rec["str"] is None else []
+            words = _words(rec)
+            var = rec.get("var")
             if rec["str"] is not None:
                 stack.append(_StackItem("String"))
             elif rec["nib"] in (CASE_START, CASE_FINISH) or kw in ("nl", "eos"):
@@ -1620,10 +1765,15 @@ def infer_declares(subs, disasm, procs):
                 callee = rec.get("callee")
                 if callee is not None and not callee.is_local:
                     calls.setdefault(callee.idx, ([], []))
-                    calls[callee.idx][0].append([ExternArg(a.by_ref, a.c_string, a.coerced or a.typ) for a in args])
+                    calls[callee.idx][0].append([ExternArg(a.by_ref, a.c_string, a.value_type) for a in args])
                     calls[callee.idx][1].append(arg_bytes)
                     arg_bytes = -1
-                stack.append(_StackItem(callee.returns if callee is not None and not callee.is_sub else ""))
+                elif callee is not None:
+                    local_args.setdefault(callee.idx, []).append([a.value_type for a in args])
+                if callee is not None:
+                    stack.append(_StackItem(callee.returns if not callee.is_sub else ""))
+                else:
+                    stack.append(_StackItem(var.type if var is not None else "", var=var))
             elif kw == "C<typ>":
                 if stack:
                     stack[-1].coerced = COERCION_TARGETS.get(tok, "")
@@ -1631,38 +1781,82 @@ def infer_declares(subs, disasm, procs):
                 mode = disasm.control_token[tok] if tok < len(disasm.control_token) else 0
                 kind = disasm.control_token[tok + 1] if tok + 1 < len(disasm.control_token) else 0
                 if kind == CTL_KIND_ADDRESS:
-                    stack.append(_StackItem(by_ref=mode != CTL_MODE_VALUE4))
+                    stack.append(_StackItem(by_ref=mode != CTL_MODE_VALUE4, var=var))
                 elif 1 <= kind <= 7:
-                    stack.append(_StackItem(DATA_TYPES[kind]))
+                    stack.append(_StackItem(DATA_TYPES[kind], var=var))
                 else:
                     alt = disasm.flag_token[tok // 3] if tok // 3 < len(disasm.flag_token) else 0
-                    stack.append(_StackItem("String" if (alt >> 10) & 7 == 7 else ""))
+                    stack.append(_StackItem("String" if (alt >> 10) & 7 == 7 else "", var=var))
             elif kw in CONST_TYPES:
-                stack.append(_StackItem(CONST_TYPES[kw]))
-            elif kw.startswith("var="):
-                if stack:
-                    stack.pop()
+                item = _StackItem(CONST_TYPES[kw])
+                item.long_literal = kw == "c&"
+                stack.append(item)
+            elif kw.startswith("var"):
+                # assignments: var=, var()= (array element, indices first). Only
+                # scalar assignments type the variable: array element stores
+                # convert to the element type themselves.
+                if kw.startswith("var()") and words:
+                    for _ in range(min(words[0], len(stack)) if words[0] < 0x8000 else 0):
+                        pop()
+                value = pop()
+                if var is not None and value.value_type and kw.startswith("var="):
+                    var.infer(value.value_type, "assign")
             elif tok in TOK_BYVAL:
                 pass
             elif kw == "&":
-                if len(stack) >= 2:
-                    stack.pop()
-                    stack[-1] = _StackItem("String")
+                pop()
+                pop()
+                stack.append(_StackItem("String"))
             elif kw in ARITH_OPS:
                 alt = disasm.flag_token[tok // 3] if tok // 3 < len(disasm.flag_token) else 0
                 if kw == "-" and alt & 0x1FF == ALT_UNARY_MINUS:
                     continue
-                if len(stack) >= 2:
-                    rhs = stack.pop()
-                    stack[-1] = _StackItem("String" if kw == "+" and rhs.typ == "String" else "")
+                rhs, lhs = pop(), pop()
+                if kw in ("=", "<>", "<", ">", "<=", ">="):
+                    for a, b in ((lhs, rhs), (rhs, lhs)):
+                        if b.long_literal and a.var is not None:
+                            a.var.infer("Long", "compare-long-literal")
+                stack.append(_StackItem("String" if kw == "+" and rhs.typ == "String" else ""))
+            elif kw in STRING_ARG_FUNCS:
+                d = disasm.convert_token(tok)
+                nargs = STRING_ARG_FUNCS[kw] or max(d["bit_fwd2"] if d else 0, 2)
+                args = [pop() for _ in range(nargs)][::-1]
+                text_index = 1 if kw == "InStr" and len(args) >= 3 else 0
+                if text_index < len(args) and args[text_index].var is not None:
+                    args[text_index].var.infer("String", f"{kw}-argument")
+                stack.append(_StackItem("Integer" if kw in ("Len", "Asc", "InStr") else "String"))
             elif kw in STRING_FUNCS:
                 if stack:
                     stack[-1] = _StackItem("String")
-            elif kw in ("Len", "Asc"):
-                if stack:
-                    stack[-1] = _StackItem("Integer")
     for idx, (arg_lists, nbytes) in calls.items():
         subs.subs[idx].params = infer_declare_params(arg_lists, nbytes)
+    _apply_parameter_evidence(subs, variables, local_args)
+
+
+def _apply_parameter_evidence(subs, variables, local_args):
+    """Name and type parameters from event signatures and from call sites."""
+    for sub in subs.subs.values():
+        start = subs.code_start(sub)
+        if start is None:
+            continue
+        params = variables.params(start)
+        if sub.event and sub.params:
+            # Event parameters are passed by reference: 4 bytes each, the last at bp+6.
+            n = len(sub.params)
+            for v in params:
+                rel = v.frame - 6
+                if rel % 4 == 0 and 0 <= rel // 4 < n:
+                    name, _, typ = sub.params[n - 1 - rel // 4].partition(" As ")
+                    v.name = name
+                    v.infer(typ, "event-signature")
+            continue
+        calls = local_args.get(sub.idx, [])
+        if params and calls and all(len(c) == len(params) for c in calls):
+            for i, v in enumerate(params):
+                for c in calls:
+                    v.infer(c[i], "call-site-argument")
+            if sub.params is None:
+                sub.params = [f"{v.name} As {v.type or 'Variant'}" for v in params]
 
 
 # ---------------------------------------------------------------------------
@@ -1723,6 +1917,35 @@ def expr_infix(recs):
 # Output
 # ---------------------------------------------------------------------------
 
+def _type_text(v):
+    """Variable type for display: '~' marks an inferred type, '?' an unknown one."""
+    if v.type_source == "inferred":
+        return f"~{v.type}"
+    if v.type_source == "conflict":
+        return "?(" + "|".join(sorted(v.recorded or v.inferred)) + ")"
+    return v.type or "?"
+
+
+def _declarations(variables, start):
+    """Plate comment lines for a procedure's parameters and frame variables."""
+    lines = []
+    for v in variables.params(start):
+        lines.append(f"Param {v.name}{'()' if v.array else ''} As {_type_text(v)}  ' bp+{v.frame:#x}")
+    for v in sorted(variables.by_proc.get(start, ()), key=lambda v: (v.frame is None, v.frame or 0, v.slot)):
+        array = ""
+        if v.array:
+            dims = ", ".join(f"{lo} To {hi}" if lo else f"{hi}" for lo, hi in v.bounds or ())
+            array = f"({dims})"
+        if v.storage == "local":
+            where = f"  ' bp-{-v.frame:#x}" if v.frame is not None else ""
+            lines.append(f"Dim {v.name}{array} As {_type_text(v)}{where}")
+        elif v.storage == "module" and v.procs == {start}:
+            # Static locals and module variables share module data; only this
+            # procedure uses this one.
+            lines.append(f"Static {v.name}{array} As {_type_text(v)}  ' module data, used only here")
+    return lines
+
+
 def _is_operator(rec):
     kw = (rec.get("kw") or "").strip()
     return kw in BINOPS or kw in UNARY
@@ -1741,7 +1964,9 @@ def _fmt_token(rec, subs=None):
         extra = f" ->{subs.target_text(rec['callee'])}"
     elif rec.get("kw") in CALL_KEYWORDS:
         extra = " ->?"
-    names = " ".join(x for x in (rec.get("ann"), rec.get("ref")) if x)
+    v = rec.get("var")
+    names = " ".join(x for x in (rec.get("ann"), rec.get("ref"),
+                                 f"{v.name}:{_type_text(v)}" if v is not None else None) if x)
     ann = f" [{names}]" if names else ""
     expr = rec.get("expr")
     tail = f"  ; {expr}" if expr and _is_operator(rec) else ""
@@ -1749,7 +1974,7 @@ def _fmt_token(rec, subs=None):
     return f"{indent}{rec['kw']:<10} np={rec['np']:>2} {p}{extra}{ann}{tail}".rstrip()
 
 
-def _plate(seg_label, i, recs, subs, callers):
+def _plate(seg_label, i, recs, subs, callers, variables=None):
     sub = subs.proc_sub(recs) if subs else None
     lines = []
     if sub is not None:
@@ -1760,10 +1985,12 @@ def _plate(seg_label, i, recs, subs, callers):
     lines.append(f"VB3 {seg_label} procedure #{i}  ({len(recs)} tokens)")
     if sub is not None and callers.get(sub.idx):
         lines.append("Called from: " + ", ".join(f"{c:#x}" for c in sorted(callers[sub.idx])))
+    if variables is not None:
+        lines += _declarations(variables, recs[0]["off"])
     return sub, "\n".join(lines)
 
 
-def annotate(program, base_addr, all_procs, subs, callers):
+def annotate(program, base_addr, all_procs, subs, callers, variables=None):
     from ghidra.program.model.symbol import RefType, SourceType
     listing = program.getListing()
     addr_space = program.getAddressFactory().getDefaultAddressSpace()
@@ -1773,7 +2000,7 @@ def annotate(program, base_addr, all_procs, subs, callers):
     for seg_label, procs in all_procs:
         for i, recs in enumerate(procs):
             addr = addr_space.getAddress(base_addr + recs[0]["off"])
-            sub, plate = _plate(seg_label, i, recs, subs, callers)
+            sub, plate = _plate(seg_label, i, recs, subs, callers, variables)
             label = subs.label(sub) if sub is not None else f"{seg_label}_proc_{i:04d}"
             cu = listing.getCodeUnitAt(addr)
             if cu:
@@ -1799,19 +2026,10 @@ def annotate(program, base_addr, all_procs, subs, callers):
 def decode_all(disasm, regions, subs=None):
     """Decode every region; returns [(label, procs)] with structure/expr applied.
 
-    Local Subs are decoded over their descriptor bounds with their module's
-    type state (gLocalVarsTypeArrExE), shared across that module's
-    procedures. Bytes outside any descriptor are scanned for START..FINISH
-    runs, which is the only discovery available for raw p-code dumps.
+    Local Subs are decoded over their descriptor bounds. Bytes outside any
+    descriptor are scanned for START..FINISH runs, which is the only discovery
+    available for raw p-code dumps.
     """
-    type_states = {}
-
-    def module_type_state(sub):
-        if sub.module not in type_states:
-            arr, count = subs.globals.module_locals(sub.module)
-            type_states[sub.module] = TypeState(count, arr) if count > 0 else None
-        return type_states[sub.module]
-
     all_procs = []
     for label, rstart, rend in regions:
         spans = []
@@ -1828,9 +2046,7 @@ def decode_all(disasm, regions, subs=None):
             if cs < gap:
                 continue   # overlapping descriptor; keep the first
             procs.extend(disasm.find_procedures(gap, cs))
-            recs = [r for r in disasm.walk(cs, ce, max_tokens=(ce - cs) // 2,
-                                           type_state=module_type_state(sub),
-                                           stop_at_finish=False)
+            recs = [r for r in disasm.walk(cs, ce, max_tokens=(ce - cs) // 2, stop_at_finish=False)
                     if "bad" not in r]
             if recs:
                 procs.append(recs)
@@ -1891,6 +2107,7 @@ def main():
     analysis, err = analyze(data, vbdis_dir, search_dirs)
     if analysis is not None:
         subs, callers = analysis["subs"], analysis["callers"]
+        variables = analysis["variables"]
         models = analysis["models"]
         externals = sum(1 for s in subs.subs.values() if not s.is_local)
         println(f"NE header: {len(analysis['segments'])} segments, {len(analysis['regions'])} look like p-code.")
@@ -1919,7 +2136,7 @@ def main():
         if rstart + rlen > len(data):
             popup(f"Region exceeds program size {hex(len(data))}. Aborting.")
             return
-        subs, callers = None, {}
+        subs, callers, variables = None, {}, None
         all_procs = decode_all(VB3Disasm(vbdis_dir, data), [("manual", rstart, rstart + rlen)])
 
     for label, procs in all_procs:
@@ -1930,7 +2147,7 @@ def main():
         return
 
     println(f"Annotating {total_procs} procedures ...")
-    n, refs = annotate(program, base_addr, all_procs, subs, callers)
+    n, refs = annotate(program, base_addr, all_procs, subs, callers, variables)
     println(f"Done: annotated {n} procedures across {len(all_procs)} segment(s), {refs} call references.")
 
 
@@ -1958,11 +2175,13 @@ def analyze(data, tables_dir, search_dirs=()):
     procs = [(label, i, recs) for label, ps in all_procs for i, recs in enumerate(ps)]
     flat = [recs for _, _, recs in procs]
     calls, callers = build_call_graph(subs, disasm, flat)
-    infer_declares(subs, disasm, flat)
     apply_slot_names(subs, disasm, flat, slot_names(globals_, forms))
+    variables = VariableTable(subs, disasm, flat)
+    simulate(subs, disasm, flat, variables)
     return {
         "segments": segments, "regions": regions, "subs": subs, "disasm": disasm,
         "procs": procs, "calls": calls, "callers": callers, "forms": forms, "models": models,
+        "variables": variables,
     }, None
 
 
@@ -1994,6 +2213,28 @@ def _sub_json(subs, sub):
         "event": ({"owner": sub.event[0], "event": sub.event[1], "slot": sub.event[2]}
                   if sub.event else None),
         "declaration": subs.declaration(sub),
+    }
+
+
+def _variable_json(v):
+    return {
+        "id": v.id,
+        "name": v.name,
+        "storage": v.storage,
+        "module": v.module,
+        "slot": v.slot,
+        "frame": v.frame,
+        "slot_word": v.slot_word,
+        "global_offset": v.global_offset,
+        "array": v.array,
+        "bounds": [list(b) for b in v.bounds] if v.bounds else None,
+        "type": v.type,
+        "type_source": v.type_source,
+        "evidence": {
+            "recorded": dict(sorted(v.recorded.items())),
+            "inferred": {t: sorted(rules) for t, rules in sorted(v.inferred.items())},
+        },
+        "procedures": sorted(v.procs),
     }
 
 
@@ -2029,6 +2270,8 @@ def _token_json(rec):
         out["var"] = rec["ann"]
     if rec.get("ref"):
         out["ref"] = rec["ref"]
+    if rec.get("var") is not None:
+        out["variable"] = rec["var"].id
     if rec.get("callee") is not None:
         out["callee"] = rec["callee"].idx
     elif rec.get("kw") in CALL_KEYWORDS:
@@ -2045,6 +2288,8 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
         if proc_offset is None or recs[0]["off"] <= proc_offset < recs[-1]["end"]
     ]
     procedures, referenced, unresolved = [], set(), 0
+    by_proc = analysis["variables"].by_proc
+    used_vars = set()
     for label, i, recs in selected:
         owner = subs.proc_sub(recs)
         if owner is not None:
@@ -2067,7 +2312,9 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
             "token_count": len(recs),
             "calls": calls,
             "callers": sorted(callers.get(owner.idx, ())) if owner is not None else [],
+            "variables": sorted(v.id for v in by_proc.get(recs[0]["off"], ())),
         }
+        used_vars.update(proc["variables"])
         if tokens:
             proc["tokens"] = [_token_json(r) for r in recs]
         procedures.append(proc)
@@ -2101,6 +2348,8 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
         },
         "forms": [_form_json(f) for f in analysis["forms"]],
         "subs": sub_list,
+        "variables": [_variable_json(v) for v in sorted(analysis["variables"].vars.values(), key=lambda v: v.id)
+                      if proc_offset is None or v.id in used_vars],
         "procedures": procedures,
         "coverage": {
             "procedures": len(analysis["procs"]),
@@ -2108,6 +2357,9 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
             "subs": len(subs.subs),
             "subs_returned": len(sub_list),
             "unresolved_calls": unresolved,
+            "variables": len(analysis["variables"].vars),
+            "variables_typed": {source: sum(1 for v in analysis["variables"].vars.values() if v.type_source == source)
+                                for source in ("recorded", "inferred", "conflict")},
             "tokens_included": tokens,
         },
     }
@@ -2163,7 +2415,7 @@ def cli(argv):
     for label, i, recs in analysis["procs"]:
         if args.proc is not None and not (recs[0]["off"] <= args.proc < recs[-1]["end"]):
             continue
-        _, plate = _plate(label, i, recs, subs, callers)
+        _, plate = _plate(label, i, recs, subs, callers, analysis["variables"])
         print("\n".join(f"; {line}" for line in plate.splitlines()))
         for rec in recs:
             print(f"{rec['off']:#08x}: {_fmt_token(rec, subs)}")

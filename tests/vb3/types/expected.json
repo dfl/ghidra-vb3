@@ -1,0 +1,215 @@
+{
+  "cases": {
+    "currency_array": {
+      "array": true,
+      "storage": "local",
+      "type": "Currency"
+    },
+    "currency_byval": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "currency_local": {
+      "storage": "local",
+      "type": "Currency"
+    },
+    "currency_module": {
+      "storage": "module",
+      "type": "Currency"
+    },
+    "currency_param": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "currency_static": {
+      "storage": "module",
+      "type": "Currency"
+    },
+    "double_array": {
+      "array": true,
+      "storage": "local",
+      "type": "Double"
+    },
+    "double_byval": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "double_local": {
+      "storage": "local",
+      "type": "Double"
+    },
+    "double_module": {
+      "storage": "module",
+      "type": "Double"
+    },
+    "double_param": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "double_redim": {
+      "array": true,
+      "storage": "local",
+      "type": "Double"
+    },
+    "double_static": {
+      "storage": "module",
+      "type": "Double"
+    },
+    "event_index_param": {
+      "name": "Index",
+      "storage": "param",
+      "type": "Integer"
+    },
+    "event_keyascii_param": {
+      "name": "KeyAscii",
+      "storage": "param",
+      "type": "Integer"
+    },
+    "form_object": {
+      "storage": "local",
+      "type": "Object"
+    },
+    "int_array": {
+      "array": true,
+      "storage": "local",
+      "type": "Integer"
+    },
+    "int_byval": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "int_local": {
+      "storage": "local",
+      "type": "Integer"
+    },
+    "int_module": {
+      "storage": "module",
+      "type": "Integer"
+    },
+    "int_param": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "int_static": {
+      "storage": "module",
+      "type": "Integer"
+    },
+    "long_array": {
+      "array": true,
+      "storage": "local",
+      "type": "Long"
+    },
+    "long_byval": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "long_compare_literal": {
+      "storage": "local",
+      "type": "Long"
+    },
+    "long_global": {
+      "storage": "global",
+      "type": "Long"
+    },
+    "long_local": {
+      "storage": "local",
+      "type": "Long"
+    },
+    "long_module": {
+      "storage": "module",
+      "type": "Long"
+    },
+    "long_param": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "long_static": {
+      "storage": "module",
+      "type": "Long"
+    },
+    "single_array": {
+      "array": true,
+      "storage": "local",
+      "type": "Single"
+    },
+    "single_byval": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "single_local": {
+      "storage": "local",
+      "type": "Single"
+    },
+    "single_module": {
+      "storage": "module",
+      "type": "Single"
+    },
+    "single_param": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "single_static": {
+      "storage": "module",
+      "type": "Single"
+    },
+    "string_array": {
+      "array": true,
+      "storage": "local",
+      "type": "String"
+    },
+    "string_byval": {
+      "storage": "param",
+      "type": "String"
+    },
+    "string_len_only": {
+      "storage": "local",
+      "type": "String"
+    },
+    "string_local": {
+      "storage": "local",
+      "type": "String"
+    },
+    "string_module": {
+      "storage": "module",
+      "type": "String"
+    },
+    "string_param": {
+      "storage": "param",
+      "type": "String"
+    },
+    "string_passed_byref": {
+      "storage": "local",
+      "type": "String"
+    },
+    "string_static": {
+      "storage": "module",
+      "type": "String"
+    },
+    "variant_array": {
+      "array": true,
+      "storage": "local",
+      "type": "Variant"
+    },
+    "variant_byval": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "variant_local": {
+      "storage": "local",
+      "type": "Variant"
+    },
+    "variant_module": {
+      "storage": "module",
+      "type": "Variant"
+    },
+    "variant_param": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "variant_static": {
+      "storage": "module",
+      "type": "Variant"
+    }
+  },
+  "program": "TYPES.MAK"
+}

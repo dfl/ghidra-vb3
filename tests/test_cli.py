@@ -10,6 +10,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "ghidra_scripts", "DisassembleVB3PCode.py")
 SAMPLE = os.environ.get("VB3_SAMPLE")
+TYPES_EXE = os.environ.get("VB3_TYPES_EXE")
 
 spec = importlib.util.spec_from_file_location("vb3", SCRIPT)
 vb3 = importlib.util.module_from_spec(spec)
@@ -65,6 +66,42 @@ class DeclareParamsTest(unittest.TestCase):
         # Two unknown arguments filling 4 bytes can only be Integers.
         calls = [[vb3.ExternArg(), vb3.ExternArg()]]
         self.assertEqual(vb3.infer_declare_params(calls, [4]), ["ByVal p1%", "ByVal p2%"])
+
+
+class TypeSuffixTest(unittest.TestCase):
+    def test_suffix_follows_data_type_code(self):
+        # Control token kinds 1..7 are Integer, Long, Single, Double, Currency, Variant, String.
+        self.assertEqual([vb3._ptoken_type_suffix(k) for k in range(1, 8)],
+                         ["%", "&", "!", "#", "@", "v", "$"])
+
+    def test_array_and_address_kinds(self):
+        self.assertEqual(vb3._ptoken_type_suffix(10), "*")
+        self.assertEqual(vb3._ptoken_type_suffix(8), "")
+
+
+class VariableTypeTest(unittest.TestCase):
+    def var(self):
+        return vb3.Variable(("frame", 0, 0x20), "local", 0x20)
+
+    def test_recorded_type_wins_over_inferred(self):
+        v = self.var()
+        v.record("Integer")
+        v.infer("String", "assign-string")
+        self.assertEqual((v.type, v.type_source), ("Integer", "recorded"))
+
+    def test_inferred_type_when_nothing_recorded(self):
+        v = self.var()
+        v.infer("Long", "compare-long-literal")
+        self.assertEqual((v.type, v.type_source), ("Long", "inferred"))
+
+    def test_disagreeing_evidence_is_a_conflict(self):
+        v = self.var()
+        v.record("Integer")
+        v.record("String")
+        self.assertEqual((v.type, v.type_source), (None, "conflict"))
+
+    def test_no_evidence_is_unknown(self):
+        self.assertEqual((self.var().type, self.var().type_source), (None, None))
 
 
 class NonNeTest(unittest.TestCase):
@@ -158,6 +195,43 @@ class SampleTest(unittest.TestCase):
                 self.assertTrue(control["name"])
         self.assertTrue(any(f["module"] in modules for f in self.out["forms"]))
 
+    def test_variable_storage_matches_frame_words(self):
+        variables = {v["id"]: v for v in self.out["variables"]}
+        self.assertTrue(variables)
+        for v in variables.values():
+            self.assertIn(v["storage"], ("local", "param", "module", "global"))
+            if v["storage"] == "local" and v["frame"] is not None:
+                self.assertLess(v["frame"], 0)
+            if v["storage"] == "param":
+                self.assertGreaterEqual(v["frame"], 6)
+            if v["storage"] == "global":
+                self.assertIsNotNone(v["global_offset"])
+            if v["type_source"] == "recorded":
+                self.assertIn(v["type"], v["evidence"]["recorded"])
+            if v["type_source"] == "inferred":
+                self.assertIn(v["type"], v["evidence"]["inferred"])
+        for proc in self.out["procedures"]:
+            for vid in proc["variables"]:
+                self.assertIn(proc["start"], variables[vid]["procedures"])
+
+    def test_event_parameters_take_event_names(self):
+        if not self.out["control_models"]["vbrun300"]:
+            self.skipTest("VBRUN300.DLL not found next to the sample")
+        variables = {v["id"]: v for v in self.out["variables"]}
+        subs = {s["index"]: s for s in self.out["subs"]}
+        named = 0
+        for proc in self.out["procedures"]:
+            sub = subs.get(proc["sub"])
+            if not sub or not sub["event"] or not sub["params"]:
+                continue
+            declared = {p.split()[0] for p in sub["params"]}
+            for vid in proc["variables"]:
+                v = variables[vid]
+                if v["storage"] == "param":
+                    self.assertIn(v["name"], declared)
+                    named += 1
+        self.assertTrue(named)
+
     def test_proc_filter_returns_containing_procedure(self):
         proc = self.out["procedures"][len(self.out["procedures"]) // 2]
         result = run(SAMPLE, "--json", "--summary", "--proc", hex(proc["end"] - 2))
@@ -166,6 +240,14 @@ class SampleTest(unittest.TestCase):
         self.assertNotIn("tokens", out["procedures"][0])
         self.assertEqual({s["index"] for s in out["subs"]},
                          {proc["sub"]} | {c["callee"] for c in proc["calls"]} - {None})
+
+
+@unittest.skipUnless(TYPES_EXE, "VB3_TYPES_EXE not set (see tests/vb3/README.md)")
+class GroundTruthTypesTest(unittest.TestCase):
+    def test_recorded_types_match_declarations(self):
+        result = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "score_types.py"),
+                                 TYPES_EXE, "--strict"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
