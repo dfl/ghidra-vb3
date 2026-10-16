@@ -46,6 +46,36 @@ python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --proc 0x13966  # one proc
 python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --calls         # call graph
 ```
 
+### JSON output
+
+`--json` emits `ghidra-vb3/disassembly-v1` for tools and agents:
+
+```bash
+python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --summary        # no per-token records
+python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --proc 0x13966   # one procedure
+```
+
+- `target`, `tables`: path, size and SHA-256 of the EXE and the token tables used.
+- `segments`: NE segments with file offset, size, flags, decoded procedure count and bytes.
+- `subs`: the Sub table (`index`, `kind`, `local`, `module`, `segment`, `code_start`,
+  `lib`, `alias`, `declaration`). With `--proc`, only Subs the procedure owns or calls.
+- `procedures`: `start`/`end` file offsets, owning `sub`, `calls` (token offset and
+  callee Sub index, `null` when unresolved), `callers`, and unless `--summary`, `tokens`
+  (`offset`, `size`, `token`, `keyword`, `params` hex, `level`, and when known `int`,
+  `string`, `var`, `callee`, `expr`).
+- `coverage`: totals versus returned counts and the number of unresolved calls.
+
+All offsets are 0-based file offsets. Strings are decoded as latin1, so every byte
+is preserved. Input that is not an NE executable produces
+`{"schema": ..., "error": {"code": "not-ne", "message": ...}}` with exit status 2.
+
+### Tests
+
+```bash
+python3 -m unittest discover -s tests                         # unit tests
+VB3_SAMPLE=/path/to/APP.EXE python3 -m unittest discover -s tests   # plus sample checks
+```
+
 ## Background
 
 Token tables are from [VBDIS3](https://www.btinternet.com/~dodi/VBDIS3.zip) by

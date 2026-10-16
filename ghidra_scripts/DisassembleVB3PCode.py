@@ -43,6 +43,10 @@ if typing.TYPE_CHECKING:
 
 import struct
 import os
+import sys
+
+__version__ = "0.3.0"
+JSON_SCHEMA = "ghidra-vb3/disassembly-v1"
 
 # ---------------------------------------------------------------------------
 # Token table loader (port of loader.py)
@@ -374,8 +378,16 @@ class VB3Disasm:
         self.control_token = control_token
         self.flag_token2   = flag_token2
         self.data          = data
+        self._token_cache  = {}
 
     def convert_token(self, int_tokens):
+        if int_tokens in self._token_cache:
+            return self._token_cache[int_tokens]
+        d = self._convert_token(int_tokens)
+        self._token_cache[int_tokens] = d
+        return d
+
+    def _convert_token(self, int_tokens):
         if int_tokens <= 0:
             return None
         idx = int_tokens // 3
@@ -487,19 +499,11 @@ class VB3Disasm:
                 yield {"off": off, "tok": int_tokens, "bad": "undecodable"}
                 return
             num_param = d["num_param"]
-            tk_param_bytes = num_param * 2
+            params_off, params_len, next_off = self._token_extent(off, num_param)
+            params = self.data[params_off:params_off + params_len]
             inline_str = None
-            if tk_param_bytes < 0:
-                vlen = struct.unpack_from("<H", self.data, off + 2)[0]
-                params = self.data[off + 4:off + 4 + vlen]
-                next_off = off + 2 + 2 + vlen
-                if next_off & 1:
-                    next_off += 1
-                if d["low_nibble"] == CASE_SPECIAL:
-                    inline_str = _inline_string(params)
-            else:
-                params = self.data[off + 2:off + 2 + tk_param_bytes]
-                next_off = off + 2 + tk_param_bytes
+            if num_param < 0 and d["low_nibble"] == CASE_SPECIAL:
+                inline_str = _inline_string(params)
 
             cval = None
             if d["keyword"] == "c%":
@@ -511,7 +515,7 @@ class VB3Disasm:
             rec = {
                 "off": off, "tok": int_tokens, "kw": d["keyword"],
                 "np": num_param, "nib": d["low_nibble"], "params": params,
-                "str": inline_str, "cval": cval, "ann": "",
+                "str": inline_str, "cval": cval, "ann": "", "end": next_off,
             }
 
             # Type inference pass (incremental)
@@ -532,18 +536,66 @@ class VB3Disasm:
                 return
             off = next_off
 
-    def find_procedures(self, region_start, region_end, type_state=None):
-        """Scan a region for coherent START..FINISH procedure runs."""
+    def _token_extent(self, off, num_param):
+        """(params offset, params length, next token offset) for a token at off.
+
+        A negative param count means [opcode:2][length:2][bytes], word-aligned.
+        """
+        if num_param < 0:
+            vlen = struct.unpack_from("<H", self.data, off + 2)[0] if off + 4 <= len(self.data) else 0
+            next_off = off + 4 + vlen
+            return off + 4, vlen, next_off + (next_off & 1)
+        return off + 2, num_param * 2, off + 2 + num_param * 2
+
+    def _scan(self, start, end, memo):
+        """Follow token boundaries from start like walk(), without decoding.
+
+        Records memo[offset] = (finished, tokens to the terminal token) for
+        every offset on the path; finished is True when the path reaches a
+        FINISH token, False when it hits an undecodable token, makes no
+        progress, or leaves the region first. Paths that join an already
+        scanned offset reuse its result, so a region is scanned in linear time.
+        """
+        path = []
+        off = start
+        limit = min(end, len(self.data))
+        finished, tail = False, 0
+        while off not in memo:
+            if off + 2 > limit:
+                break
+            d = self.convert_token(struct.unpack_from("<H", self.data, off)[0])
+            if d is None:
+                break
+            path.append(off)
+            if d["low_nibble"] == CASE_FINISH:
+                finished = True
+                break
+            next_off = self._token_extent(off, d["num_param"])[2]
+            if next_off <= off:
+                break
+            off = next_off
+        else:
+            finished, tail = memo[off]
+        # memo value: (finished, tokens from this offset through the FINISH token)
+        n = len(path)
+        for i, o in enumerate(path):
+            memo[o] = (finished, n - i + tail)
+        return memo.get(start, (False, 0))
+
+    def find_procedures(self, region_start, region_end, type_state=None, max_tokens=4000):
+        """Scan a region for coherent START..FINISH procedure runs of at most
+        max_tokens tokens (walk()'s default cap)."""
         procs = []
+        memo = {}
         off = region_start
         while off < region_end:
             if off + 2 > len(self.data):
                 break
-            int_tokens = struct.unpack_from("<H", self.data, off)[0]
-            d = self.convert_token(int_tokens)
+            d = self.convert_token(struct.unpack_from("<H", self.data, off)[0])
             if d and d["low_nibble"] == CASE_START:
-                recs = list(self.walk(off, region_end, type_state=type_state))
-                if recs and not any("bad" in r for r in recs) and recs[-1]["nib"] == CASE_FINISH:
+                finished, count = memo[off] if off in memo else self._scan(off, region_end, memo)
+                if finished and count <= max_tokens:
+                    recs = list(self.walk(off, region_end, type_state=type_state))
                     procs.append(recs)
                     off = recs[-1]["off"] + 2
                     continue
@@ -1043,37 +1095,187 @@ def main():
 # Command line (outside Ghidra)
 # ---------------------------------------------------------------------------
 
+def analyze(data, tables_dir):
+    """Decode an NE EXE. Returns (analysis dict, None) or (None, error string)."""
+    segments, err = parse_ne_segments(data)
+    if segments is None:
+        return None, err
+    disasm = VB3Disasm(tables_dir, data)
+    subs = SubTable(data, segments, VB3GlobalData(data))
+    regions = pcode_regions(disasm, segments)
+    all_procs = decode_all(disasm, regions, subs)
+    procs = [(label, i, recs) for label, ps in all_procs for i, recs in enumerate(ps)]
+    calls, callers = build_call_graph(subs, disasm, [recs for _, _, recs in procs])
+    return {
+        "segments": segments, "regions": regions, "subs": subs, "disasm": disasm,
+        "procs": procs, "calls": calls, "callers": callers,
+    }, None
+
+
+# ---------------------------------------------------------------------------
+# JSON output. Offsets are 0-based file offsets. Unknown values are null;
+# string constants are latin1-decoded so every byte is preserved.
+# ---------------------------------------------------------------------------
+
+def _sha256(path):
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _sub_json(subs, sub):
+    return {
+        "index": sub.idx,
+        "kind": "sub" if sub.is_sub else "function",
+        "local": sub.is_local,
+        "module": sub.module,
+        "segment": sub.seg if sub.is_local else None,
+        "code_start": subs.code_start(sub),
+        "lib": sub.lib.rstrip(".") if not sub.is_local else None,
+        "alias": sub.alias if not sub.is_local else None,
+        "declaration": subs.declaration(sub),
+    }
+
+
+def _token_json(rec):
+    out = {
+        "offset": rec["off"],
+        "size": rec["end"] - rec["off"],
+        "token": rec["tok"],
+        "keyword": rec["kw"],
+        "params": rec["params"].hex(),
+        "level": rec.get("level", 0),
+    }
+    if rec["cval"] is not None:
+        out["int"] = rec["cval"]
+    if rec["str"] is not None:
+        out["string"] = rec["str"].decode("latin1")
+    if rec.get("ann"):
+        out["var"] = rec["ann"]
+    if rec.get("callee") is not None:
+        out["callee"] = rec["callee"].idx
+    elif rec.get("kw") in CALL_KEYWORDS:
+        out["callee"] = None
+    if rec.get("expr") and _is_operator(rec):
+        out["expr"] = rec["expr"]
+    return out
+
+
+def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
+    subs, callers = analysis["subs"], analysis["callers"]
+    selected = [
+        (label, i, recs) for label, i, recs in analysis["procs"]
+        if proc_offset is None or recs[0]["off"] <= proc_offset < recs[-1]["end"]
+    ]
+    procedures, referenced, unresolved = [], set(), 0
+    for label, i, recs in selected:
+        owner = subs.proc_sub(recs)
+        if owner is not None:
+            referenced.add(owner.idx)
+        calls = []
+        for rec in recs:
+            callee = rec.get("callee")
+            if callee is not None:
+                referenced.add(callee.idx)
+                calls.append({"offset": rec["off"], "callee": callee.idx})
+            elif rec.get("kw") in CALL_KEYWORDS:
+                calls.append({"offset": rec["off"], "callee": None})
+                unresolved += 1
+        proc = {
+            "segment": int(label[3:]),
+            "index": i,
+            "start": recs[0]["off"],
+            "end": recs[-1]["end"],
+            "sub": owner.idx if owner is not None else None,
+            "token_count": len(recs),
+            "calls": calls,
+            "callers": sorted(callers.get(owner.idx, ())) if owner is not None else [],
+        }
+        if tokens:
+            proc["tokens"] = [_token_json(r) for r in recs]
+        procedures.append(proc)
+
+    decoded, proc_counts = {}, {}
+    for label, _, recs in analysis["procs"]:
+        seg = int(label[3:])
+        decoded[seg] = decoded.get(seg, 0) + recs[-1]["end"] - recs[0]["off"]
+        proc_counts[seg] = proc_counts.get(seg, 0) + 1
+    sub_list = [
+        _sub_json(subs, sub) for sub in subs.subs.values()
+        if proc_offset is None or sub.idx in referenced
+    ]
+    return {
+        "schema": JSON_SCHEMA,
+        "tool": {"name": "ghidra-vb3", "version": __version__},
+        "target": {"path": os.path.abspath(exe_path), "size": len(analysis["disasm"].data),
+                   "sha256": _sha256(exe_path)},
+        "tables": {name: _sha256(os.path.join(tables_dir, name))
+                   for name in ("vbdis3i.dat", "vbdis3x.dat")},
+        "segments": [
+            {"segment": s["seg_num"], "file_offset": s["file_off"], "file_size": s["file_size"],
+             "flags": s["flags"], "data": bool(s["flags"] & SEG_DATA),
+             "procedures": proc_counts.get(s["seg_num"], 0), "decoded_bytes": decoded.get(s["seg_num"], 0)}
+            for s in analysis["segments"]
+        ],
+        "subs": sub_list,
+        "procedures": procedures,
+        "coverage": {
+            "procedures": len(analysis["procs"]),
+            "procedures_returned": len(procedures),
+            "subs": len(subs.subs),
+            "subs_returned": len(sub_list),
+            "unresolved_calls": unresolved,
+            "tokens_included": tokens,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Command line (outside Ghidra)
+# ---------------------------------------------------------------------------
+
 def cli(argv):
     import argparse
+    import json
     ap = argparse.ArgumentParser(description="Disassemble VB3 p-code from an NE EXE.")
     ap.add_argument("exe")
     ap.add_argument("--tables", default=os.path.dirname(os.path.abspath(__file__)),
                     help="directory containing vbdis3i.dat and vbdis3x.dat")
     ap.add_argument("--proc", type=lambda v: int(v, 0),
-                    help="only print the procedure containing this file offset")
+                    help="only output the procedure containing this file offset")
     ap.add_argument("--calls", action="store_true", help="print the call graph instead of tokens")
+    ap.add_argument("--json", action="store_true", help=f"emit {JSON_SCHEMA} JSON")
+    ap.add_argument("--summary", action="store_true", help="with --json, omit per-token records")
+    ap.add_argument("--version", action="version", version=f"ghidra-vb3 {__version__}")
     args = ap.parse_args(argv)
 
-    data = open(args.exe, "rb").read()
-    disasm = VB3Disasm(args.tables, data)
-    segments, err = parse_ne_segments(data)
-    if segments is None:
+    with open(args.exe, "rb") as f:
+        data = f.read()
+    analysis, err = analyze(data, args.tables)
+    if analysis is None:
+        if args.json:
+            json.dump({"schema": JSON_SCHEMA, "error": {"code": "not-ne", "message": err}}, sys.stdout)
+            print()
+            raise SystemExit(2)
         raise SystemExit(f"{args.exe}: {err}")
-    subs = SubTable(data, segments, VB3GlobalData(data))
-    all_procs = decode_all(disasm, pcode_regions(disasm, segments), subs)
-    procs = [(label, i, recs) for label, ps in all_procs for i, recs in enumerate(ps)]
-    calls, callers = build_call_graph(subs, disasm, [recs for _, _, recs in procs])
 
+    if args.json:
+        json.dump(to_json(analysis, args.exe, args.tables, args.proc, tokens=not args.summary),
+                  sys.stdout, separators=(",", ":"))
+        print()
+        return
+
+    subs, calls, callers = analysis["subs"], analysis["calls"], analysis["callers"]
     if args.calls:
-        for label, i, recs in procs:
+        for label, i, recs in analysis["procs"]:
             sub = subs.proc_sub(recs)
             name = subs.declaration(sub) if sub else f"{label}_proc_{i:04d}"
             for off, callee in calls.get(recs[0]["off"], []):
                 print(f"{recs[0]['off']:#08x} {name} @{off:#08x} -> {subs.target_text(callee)}")
         return
 
-    for label, i, recs in procs:
-        if args.proc is not None and not (recs[0]["off"] <= args.proc <= recs[-1]["off"]):
+    for label, i, recs in analysis["procs"]:
+        if args.proc is not None and not (recs[0]["off"] <= args.proc < recs[-1]["end"]):
             continue
         _, plate = _plate(label, i, recs, subs, callers)
         print("\n".join(f"; {line}" for line in plate.splitlines()))
@@ -1085,5 +1287,4 @@ def cli(argv):
 if "currentProgram" in globals():
     main()
 elif __name__ == "__main__":
-    import sys
     cli(sys.argv[1:])
