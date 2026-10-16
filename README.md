@@ -13,9 +13,10 @@ annotates the Ghidra listing with:
 - An EOL comment on every token: opcode keyword, parameter count, raw param
   bytes, a VBDIS3-style variable annotation (`gv1780%`), block indentation, and
   a best-effort infix expression on operators.
-- Resolved `Call` targets: `->sub#111@0x13966` for local procedures (also added
-  as a call reference, so Ghidra's cross-references work) and
-  `->dwspydll.dll:dwCopyData` for external `Declare` calls.
+- Resolved call targets, both `Call` statements and function calls in
+  expressions: `->sub#262@0x2fe02` for local procedures (also added as a call
+  reference, so Ghidra's cross-references work) and `->vbprint.dll:moveypos`
+  for external `Declare` functions.
 
 Scope is intentionally limited to **opcode + params per token**, with call
 resolution and light structuring on top. It does not reconstruct VB source.

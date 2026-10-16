@@ -12,8 +12,9 @@
 #   - opcode keyword + raw param bytes (always)
 #   - VBDIS3-style variable reference, e.g. "gv1780%" = global variable at slot
 #     0x1780, type Integer (when EXE resources are parseable)
-#   - resolved Call targets: "->sub#12@0x13966" for local Subs/Functions,
-#     "->USER:GetClientRect" for external Declare calls
+#   - resolved call targets (Call statements and function calls):
+#     "->sub#262@0x2fe02" for local Subs/Functions, "->vbprint.dll:moveypos"
+#     for external Declare functions
 #   - block indentation (If/For/Do/Select) and a best-effort infix expression
 #
 # Usage:
@@ -171,106 +172,98 @@ def _parse_ne_rcdata_list(data):
 
 
 # ---------------------------------------------------------------------------
-# VB3 resource data parser — loads SomeDataBuff + per-module local var tables
+# VB3 global data (RC_DATA name id 0x8002, VBDIS3 MODULE4 ScanGlobalData)
+#
+# Layout from offset 0x60, each block prefixed by its u16 byte size:
+#   gv0B8A block
+#   fBuff1 (u16)
+#   SomeDataBuff (gv09B6 bytes of int16)
+#   global array table block
+#   name pool block (gv0B92): T2237 records <M2241:2><M12C8:1><len:1><name>
+#   module data blocks: <module id:u16><size:u16><module data>, each followed
+#     by fixup blocks <size:u16><count:u16><0x001E:u16>...
+#
+# Module data (gLocalVarsTypeArrExE) is addressed by the byte offsets that
+# appear in variable-reference tokens; a slot can hold a rotated Sub chain
+# token for calls to Declare'd functions.
 # ---------------------------------------------------------------------------
-# VB3 stores module/form data as RC_DATA resources.
-# RC_DATA[0] = main project data (form/module list, ScanRCFrmData)
-# RC_DATA[1] = global data (ScanGlobalData): SomeDataBuff + module descriptor list
-# RC_DATA[2..N] = per-module code + fixup data
-#
-# Within RC_DATA[1] (Base1, 1-based VB file positions):
-#   Base1 + 0x24          → gv0B68
-#   Base1 + 0x60          → fBuff2 (size of first block)
-#   Base1 + 0x62          → first block (gv0B8A), skip fBuff2 bytes
-#   then two more u16s     → fBuff1, fBuff2=gv09B6
-#   then                   → SomeDataBuff (gv09B6 bytes = gv09BA+1 int16s)
-#   skip two more u16 blocks → gv0B92
-#   then one more u16 block → gfrmOffset
-#
-# Module descriptor list at gfrmOffset (all offsets relative to Base1):
-#   [u16 module_id, then at mfrmOffset:]
-#   u16 size = gRawVBCodeSize
-#   (gRawVBCodeSize//2) int16s = gLocalVarsTypeArrExE[0..gLocalVarsCount]
 
-def parse_vb3_resources(data):
-    """
-    Parse VB3 RC_DATA resources. Returns a VB3Resources object or None on failure.
-    """
-    rc = _parse_ne_rcdata_list(data)
-    if len(rc) < 2:
-        return None
+RT_RCDATA_VB_GLOBAL = 0x8002
+FIXUP_BLOCK_TAG = 0x001E
 
-    base1_foff = rc[1][0]   # file offset of RC_DATA[1] = Base1 - 1 (0-based)
-    Base1 = base1_foff + 1  # VB 1-based file position
 
-    def u16(vb_pos):
-        return struct.unpack_from("<H", data, vb_pos - 1)[0]
+class VB3GlobalData:
+    def __init__(self, data):
+        self.data = data
+        self.base = None          # file offset of the RC_DATA resource
+        self.some_data = []
+        self.name_pool = None     # (file offset, size)
+        self.modules = {}         # module id -> module data bytes
+        rc = [r for r in _parse_ne_rcdata_list(data) if r[2] == RT_RCDATA_VB_GLOBAL]
+        if rc:
+            self.base, self.size = rc[0][0], rc[0][1]
+            self._parse()
 
-    def s16(vb_pos):
-        return struct.unpack_from("<h", data, vb_pos - 1)[0]
+    def _u16(self, off):
+        return struct.unpack_from("<H", self.data, self.base + off)[0]
 
-    try:
+    def _in_bounds(self, off, n):
+        return off + n <= self.size and self.base + off + n <= len(self.data)
+
+    def _parse(self):
         i = 0x60
-        fBuff2 = u16(Base1 + i);   i += 2
-        i += fBuff2                 # skip first block (gv0B8A)
-        _fBuff1 = s16(Base1 + i);  i += 2
-        fBuff2  = s16(Base1 + i);  i += 2
-        gv09B6  = fBuff2 & 0xFFFF
-        gv09BA  = (gv09B6 // 2) - 1
+        if not self._in_bounds(i, 2):
+            return
+        i += 2 + self._u16(i)                      # gv0B8A
+        i += 2                                      # fBuff1
+        some_size = self._u16(i)
+        i += 2
+        if not self._in_bounds(i, some_size):
+            return
+        self.some_data = list(struct.unpack_from(f"<{some_size // 2}h", self.data, self.base + i))
+        i += some_size
+        i += 2 + self._u16(i)                      # global array table
+        pool_size = self._u16(i)
+        self.name_pool = (self.base + i + 2, pool_size)
+        i += 2 + pool_size
 
-        some_data_off = Base1 + i  # VB 1-based start of SomeDataBuff
-        some_data = [s16(some_data_off + k * 2) for k in range(gv09BA + 1)]
-
-        i += gv09B6
-        fBuff2 = u16(Base1 + i); i += 2
-        i += fBuff2
-        fBuff2 = u16(Base1 + i); i += 2
-        i += fBuff2
-        gfrmOffset = i
-
-        # Parse module descriptor list
-        modules = []
-        mi = gfrmOffset
-        for _ in range(256):
-            raw_id = s16(Base1 + mi); mi += 2
-            if raw_id == 0 or raw_id == -1:
+        while self._in_bounds(i, 4):
+            mod_id = self._u16(i)
+            if mod_id in (0, 0xFFFF):
                 break
-            mfrmOffset = mi
-            skip = u16(Base1 + mi); mi += 2
-            modules.append({"mfrmOffset": mfrmOffset, "raw_id": raw_id})
-            mi += skip
-            # If form type (M24D0='F'=0x46), skip two more blocks
-            # We can't easily distinguish without the form struct, so skip conservatively
+            size = self._u16(i + 2)
+            i += 4
+            if not self._in_bounds(i, size):
+                break
+            self.modules[mod_id] = self.data[self.base + i:self.base + i + size]
+            i += size
+            while self._in_bounds(i, 6) and self._u16(i + 4) == FIXUP_BLOCK_TAG:
+                fsize, count = self._u16(i), self._u16(i + 2)
+                i += 6
+                i += 3 * ((fsize - 4) // 3) if count == 0 else count * 2
 
-        return VB3Resources(data, Base1, some_data, gv09BA, modules)
+    def pool_name(self, offs):
+        if self.name_pool is None:
+            return ""
+        pos = self.name_pool[0] + offs
+        if pos + 4 > len(self.data):
+            return ""
+        length = self.data[pos + 3]
+        return self.data[pos + 4:pos + 4 + length].decode("latin1", errors="replace")
 
-    except Exception:
-        return None
+    def module_word(self, mod_id, offset):
+        mod = self.modules.get(mod_id)
+        if mod is None or offset + 2 > len(mod):
+            return None
+        return struct.unpack_from("<H", mod, offset)[0]
 
-
-class VB3Resources:
-    def __init__(self, data, Base1, some_data, gv09BA, modules):
-        self.data   = data
-        self.Base1  = Base1
-        self.some_data = some_data
-        self.gv09BA    = gv09BA
-        self.modules   = modules
-
-    def load_module_locals(self, mfrmOffset):
-        """Load gLocalVarsTypeArrExE for a module. Returns (arr, count) or ([], 0)."""
-        def s16(vb_pos):
-            return struct.unpack_from("<h", self.data, vb_pos - 1)[0]
-        def u16(vb_pos):
-            return struct.unpack_from("<H", self.data, vb_pos - 1)[0]
-        try:
-            raw_size = u16(self.Base1 + mfrmOffset)
-            count = (raw_size // 2) - 1
-            if count < 0 or raw_size < 6:
-                return [], 0
-            arr = [s16(self.Base1 + mfrmOffset + 2 + k * 2) for k in range(count + 1)]
-            return arr, count
-        except Exception:
+    def module_locals(self, mod_id):
+        """gLocalVarsTypeArrExE for a module: (int16 array, count)."""
+        mod = self.modules.get(mod_id)
+        if not mod or len(mod) < 4:
             return [], 0
+        arr = list(struct.unpack_from(f"<{len(mod) // 2}h", mod))
+        return arr, len(arr) - 1
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +355,15 @@ def _signed16(v):
     return v - 0x10000 if v >= 0x8000 else v
 
 
+def _inline_string(params):
+    """String constant payload: <link:u16><length:u16><chars>, NUL-padded."""
+    if len(params) >= 4:
+        length = struct.unpack_from("<H", params, 2)[0]
+        if length <= len(params) - 4:
+            return params[4:4 + length]
+    return params
+
+
 class VB3Disasm:
     def __init__(self, vbdis_dir, data):
         tokens, _, vbstr = _load_i_dat(os.path.join(vbdis_dir, "vbdis3i.dat"))
@@ -446,11 +448,10 @@ class VB3Disasm:
             var_off = struct.unpack_from("<H", rec["params"], len(rec["params"]) - 2)[0]
             var_index = var_off // 2
 
-        # Build annotation
-        # Kind char from gc114A (l01B4 1-indexed)
+        # Kind char: Mid$(gc114A, l01B4, 1), only for l01B4 > gc114E (MODULE11)
         kind_char = ""
-        if 1 <= l01B4 <= len(GC114A) - 1:
-            kind_char = GC114A[l01B4]  # 1-indexed in VB; GC114A[0]='?', [1]='p', ...
+        if 2 <= l01B4 <= len(GC114A):
+            kind_char = GC114A[l01B4 - 1]
         elif has_lv:
             kind_char = "?"
 
@@ -495,7 +496,7 @@ class VB3Disasm:
                 if next_off & 1:
                     next_off += 1
                 if d["low_nibble"] == CASE_SPECIAL:
-                    inline_str = params
+                    inline_str = _inline_string(params)
             else:
                 params = self.data[off + 2:off + 2 + tk_param_bytes]
                 next_off = off + 2 + tk_param_bytes
@@ -564,11 +565,11 @@ class VB3Disasm:
 #   - A Call target T resolves via NamesLookUpTbl[ror3(T)+1] -> sub index.
 # ---------------------------------------------------------------------------
 
-RT_RCDATA_VB_GLOBAL = 0x8002   # RC_DATA name id holding VB3 global data
 MAX_SUBS = 2000
 
 # VBModuleDef_struc field indexes (u16 words)
 VBMD_SUB_OR_FUNC = 6    # bit 0: 1 = Sub, 0 = Function
+VBMD_MODULE      = 10   # owning module id
 VBMD_IS_LOCAL    = 11   # bit 0: 1 = local, 0 = external Declare
 VBMD_OFFS        = 12   # code offset within the sub's segment
 VBMD_NEXT        = 13   # M1551 chain link
@@ -576,8 +577,12 @@ VBMD_LIB         = 20   # M1587 Lib name (name-pool offset)
 VBMD_ALIAS       = 23   # M159D Alias/proc name (name-pool offset)
 
 CALL_KEYWORDS = ("Call ", "call")
-GC1156 = 5   # flag_token2 kind for an external Declare call ...
-GC1172 = 6   # ... under this access class
+# flag_token2 classes (MAIN.bas). Under access class gc1172 a token references
+# a Sub: kind gc1156 carries the chain token inline, kind gc1152 names a module
+# data slot that holds it (MODULE11 ScanTokens Case Else).
+GC1152 = 3
+GC1156 = 5
+GC1172 = 6
 
 
 def _ror3(v):
@@ -586,7 +591,7 @@ def _ror3(v):
 
 
 class SubInfo:
-    __slots__ = ("idx", "is_local", "is_sub", "offs", "seg", "lib", "alias")
+    __slots__ = ("idx", "is_local", "is_sub", "offs", "seg", "module", "lib", "alias")
 
     def __init__(self, idx, vals, lib, alias):
         self.idx      = idx
@@ -594,6 +599,7 @@ class SubInfo:
         self.is_sub   = bool(vals[VBMD_SUB_OR_FUNC] & 1)
         self.offs     = vals[VBMD_OFFS] if self.is_local else -1
         self.seg      = None   # code segment number, from SELECTOR relocs
+        self.module   = vals[VBMD_MODULE]
         self.lib      = lib
         self.alias    = alias
 
@@ -601,8 +607,9 @@ class SubInfo:
 class SubTable:
     """VB3 Sub/Function/Declare table recovered from an NE EXE."""
 
-    def __init__(self, data, segments):
+    def __init__(self, data, segments, globals_):
         self.data = data
+        self.globals = globals_
         self.seg_base = {s["seg_num"]: s["file_off"] for s in segments}
         self.subs = {}         # sub index (1-based) -> SubInfo
         self.names_tbl = {}    # ror3(chain token) + 1 -> sub index
@@ -621,11 +628,9 @@ class SubTable:
              if (s["flags"] & SEG_RELOCINFO) and s["seg_num"] != initial_cs and s["file_size"] >= 256),
             None,
         )
-        rc = [r for r in _parse_ne_rcdata_list(data) if r[2] == RT_RCDATA_VB_GLOBAL]
-        if start is None or not rc:
+        if start is None or self.globals.base is None:
             return
-        rc_base = rc[0][0]
-        name_pool = self._name_pool(rc_base)
+        rc_base = self.globals.base
         vb_start_seg = start["seg_num"]
 
         def vb_abs_offs(tok):
@@ -645,8 +650,8 @@ class SubTable:
             is_local = bool(vals[VBMD_IS_LOCAL] & 1)
             lib = alias = ""
             if not is_local:
-                lib = self._pool_name(name_pool, vals[VBMD_LIB])
-                alias = self._pool_name(name_pool, vals[VBMD_ALIAS])
+                lib = self.globals.pool_name(vals[VBMD_LIB])
+                alias = self.globals.pool_name(vals[VBMD_ALIAS])
             self.subs[idx] = SubInfo(idx, vals, lib, alias)
             link = vals[VBMD_NEXT]
 
@@ -674,24 +679,6 @@ class SubTable:
                 chain = self._u16(chain_pos)
                 hops += 1
 
-    def _name_pool(self, rc_base):
-        """(base, size) of the RC_DATA name pool gv0B92 (MODULE4 ScanGlobalData)."""
-        i = 0x60
-        i += 2 + self._u16(rc_base + i)    # gv0B8A block
-        i += 2                              # fBuff1
-        i += 2 + self._u16(rc_base + i)    # gv0B8E block (SomeDataBuff)
-        i += 2 + self._u16(rc_base + i)    # intermediate block
-        size = self._u16(rc_base + i)
-        return rc_base + i + 2, size
-
-    def _pool_name(self, pool, offs):
-        """Read a T2237 name record <M2241:2><M12C8:1><len:1><name> at pool+offs."""
-        pos = pool[0] + offs
-        if pos + 4 > len(self.data):
-            return ""
-        length = self.data[pos + 3]
-        return self.data[pos + 4:pos + 4 + length].decode("latin1", errors="replace")
-
     def code_start(self, sub):
         if not sub.is_local or sub.offs <= 0 or sub.seg not in self.seg_base:
             return None
@@ -711,22 +698,31 @@ class SubTable:
         idx = self.names_tbl.get(_ror3(target) + 1)
         return self.subs.get(idx) if idx is not None else None
 
-    def resolve_call(self, disasm, rec):
-        """Resolve a Call token record to a SubInfo, or None.
+    def resolve_call(self, disasm, rec, module=None):
+        """Resolve a token that references a Sub to its SubInfo, or None.
 
-        Internal Sub calls carry the target directly in params[2:4]. External
-        Declare calls (flag_token2 kind gc1156 under gc1172) clear bit 0 first
-        (MODULE11: VarIndex = (raw \\ 2) * 2, then RotateRight3).
+        `Call` tokens carry an internal target directly in params[2:4]. Other
+        references follow MODULE11 under access class gc1172, with VarIndex =
+        the token's last param word / 2:
+          gc1156: chain token = VarIndex * 2 (bit 0 cleared)
+          gc1152: chain token = gLocalVarsTypeArrExE[VarIndex] of `module`
         """
-        if rec.get("kw") not in CALL_KEYWORDS or len(rec["params"]) < 4:
+        params = rec.get("params") or b""
+        if len(params) < 2 or rec.get("str") is not None:
             return None
-        _, target = struct.unpack_from("<HH", rec["params"])
-        sub = self.resolve(target)
-        if sub is not None and (not sub.is_local or self.code_start(sub) is not None):
-            return sub
+        if rec.get("kw") in CALL_KEYWORDS and len(params) >= 4:
+            sub = self.resolve(struct.unpack_from("<H", params, 2)[0])
+            if sub is not None and (not sub.is_local or self.code_start(sub) is not None):
+                return sub
         l01B4, _l01BA, l01BC = disasm._ft2_lookup(rec["tok"])
-        if l01B4 == GC1156 and l01BC == GC1172:
-            return self.resolve(target & 0xFFFE)
+        if l01BC != GC1172:
+            return None
+        raw = struct.unpack_from("<H", params, len(params) - 2)[0]
+        if l01B4 == GC1156:
+            return self.resolve(raw & 0xFFFE)
+        if l01B4 == GC1152 and module is not None:
+            token = self.globals.module_word(module, raw & 0xFFFE)
+            return self.resolve(token) if token else None
         return None
 
     def name(self, sub):
@@ -773,8 +769,10 @@ def build_call_graph(subs, disasm, procs):
     calls, callers = {}, {}
     for recs in procs:
         start = recs[0]["off"]
+        owner = subs.proc_sub(recs)
+        module = owner.module if owner is not None else None
         for rec in recs:
-            sub = subs.resolve_call(disasm, rec)
+            sub = subs.resolve_call(disasm, rec, module)
             if sub is None:
                 continue
             rec["callee"] = sub
@@ -855,9 +853,10 @@ def _fmt_token(rec, subs=None):
         extra = f" ={rec['cval']}"
     elif rec["str"] is not None:
         extra = f" {rec['str'].decode('latin1', errors='replace')!r}"
-    elif rec.get("kw") in CALL_KEYWORDS and subs is not None:
-        callee = rec.get("callee")
-        extra = f" ->{subs.target_text(callee)}" if callee else " ->?"
+    elif rec.get("callee") is not None and subs is not None:
+        extra = f" ->{subs.target_text(rec['callee'])}"
+    elif rec.get("kw") in CALL_KEYWORDS:
+        extra = " ->?"
     ann = f" [{rec['ann']}]" if rec.get("ann") else ""
     expr = rec.get("expr")
     tail = f"  ; {expr}" if expr and _is_operator(rec) else ""
@@ -909,15 +908,33 @@ def annotate(program, base_addr, all_procs, subs, callers):
     return total, refs
 
 
-def decode_all(disasm, data, regions, type_state_for=None):
-    """Decode every region; returns [(label, procs)] with structure/expr applied."""
+def decode_all(disasm, regions, subs=None):
+    """Decode every region; returns [(label, procs)] with structure/expr applied.
+
+    Each procedure owned by a known Sub is re-walked with its module's type
+    state (gLocalVarsTypeArrExE), shared across that module's procedures.
+    """
+    type_states = {}
+
+    def module_type_state(recs):
+        owner = subs.proc_sub(recs) if subs is not None else None
+        if owner is None:
+            return None
+        if owner.module not in type_states:
+            arr, count = subs.globals.module_locals(owner.module)
+            type_states[owner.module] = TypeState(count, arr) if count > 0 else None
+        return type_states[owner.module]
+
     all_procs = []
     for label, rstart, rend in regions:
-        type_state = type_state_for() if type_state_for else None
-        procs = disasm.find_procedures(rstart, rend, type_state=type_state)
-        for recs in procs:
+        procs = []
+        for recs in disasm.find_procedures(rstart, rend):
+            type_state = module_type_state(recs)
+            if type_state is not None:
+                recs = list(disasm.walk(recs[0]["off"], rend, type_state=type_state))
             structure(recs)
             expr_infix(recs)
+            procs.append(recs)
         if procs:
             all_procs.append((label, procs))
     return all_procs
@@ -930,18 +947,6 @@ def pcode_regions(disasm, segments):
         if not (s["flags"] & SEG_DATA) and disasm.probe_pcode(s["file_off"], s["file_size"])
     ]
 
-
-
-
-def type_state_factory(vb3res):
-    """TypeState builder using the largest module's locals (heuristic for single-module apps)."""
-    if not (vb3res and vb3res.modules):
-        return None
-    best = max(vb3res.modules, key=lambda m: vb3res.load_module_locals(m["mfrmOffset"])[1])
-    arr, count = vb3res.load_module_locals(best["mfrmOffset"])
-    if count <= 0:
-        return None
-    return lambda: TypeState(count, arr)
 
 
 # ---------------------------------------------------------------------------
@@ -980,11 +985,11 @@ def main():
     disasm = VB3Disasm(vbdis_dir, data)
     println(f"Loaded {len(disasm.tokens)} opcodes.")
 
-    vb3res = parse_vb3_resources(data)
-    if vb3res:
-        println(f"VB3 resources: {len(vb3res.modules)} module(s) found.")
+    globals_ = VB3GlobalData(data)
+    if globals_.base is not None:
+        println(f"VB3 global data: {len(globals_.modules)} module data block(s).")
     else:
-        println("VB3 resource parse: not available (raw dump or unsupported format).")
+        println("VB3 global data: not available (raw dump or unsupported format).")
 
     segments, err = parse_ne_segments(data)
     regions = []
@@ -992,7 +997,7 @@ def main():
     if segments is not None:
         regions = pcode_regions(disasm, segments)
         println(f"NE header: {len(segments)} segments, {len(regions)} look like p-code.")
-        subs = SubTable(data, segments)
+        subs = SubTable(data, segments, globals_)
         externals = sum(1 for s in subs.subs.values() if not s.is_local)
         println(f"Sub table: {len(subs.subs)} subs ({externals} external Declares).")
     else:
@@ -1016,7 +1021,7 @@ def main():
         regions.append(("manual", rstart, rstart + rlen))
 
     println("Scanning for procedures ...")
-    all_procs = decode_all(disasm, data, regions, type_state_factory(vb3res))
+    all_procs = decode_all(disasm, regions, subs)
     for label, procs in all_procs:
         println(f"  {label}: {len(procs)} procedures")
 
@@ -1054,9 +1059,8 @@ def cli(argv):
     segments, err = parse_ne_segments(data)
     if segments is None:
         raise SystemExit(f"{args.exe}: {err}")
-    subs = SubTable(data, segments)
-    all_procs = decode_all(disasm, data, pcode_regions(disasm, segments),
-                           type_state_factory(parse_vb3_resources(data)))
+    subs = SubTable(data, segments, VB3GlobalData(data))
+    all_procs = decode_all(disasm, pcode_regions(disasm, segments), subs)
     procs = [(label, i, recs) for label, ps in all_procs for i, recs in enumerate(ps)]
     calls, callers = build_call_graph(subs, disasm, [recs for _, _, recs in procs])
 
