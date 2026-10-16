@@ -7,22 +7,30 @@
 # Requires VBDIS3 token table files (vbdis3i.dat + vbdis3x.dat)
 # from a VBDIS3 installation (https://www.btinternet.com/~dodi/VBDIS3.zip).
 #
-# Produces two levels of annotation on each token:
+# Produces these annotations on each token:
 #
-#   Level 1 (always): opcode keyword + raw param bytes
-#   Level 2 (when EXE resources are parseable): variable-reference annotation
-#     in VBDIS3 style, e.g. "gv1780%" = global variable at slot 0x1780, type Integer
+#   - opcode keyword + raw param bytes (always)
+#   - VBDIS3-style variable reference, e.g. "gv1780%" = global variable at slot
+#     0x1780, type Integer (when EXE resources are parseable)
+#   - resolved Call targets: "->sub#12@0x13966" for local Subs/Functions,
+#     "->USER:GetClientRect" for external Declare calls
+#   - block indentation (If/For/Do/Select) and a best-effort infix expression
 #
 # Usage:
 #   1. Load your VB3 EXE into Ghidra as a raw binary, OR load a raw p-code dump.
 #   2. Run this script via Script Manager.
-#   3. Point it at your VBDIS3 directory when prompted.
+#   3. The token tables are read from this script's directory; if they are not
+#      there you are prompted for a VBDIS3 directory.
 #   4. For a VB3 EXE the script auto-detects p-code segments via the NE header
 #      and also attempts to load per-module type tables from the RC_DATA resources.
 #      For a raw dump, enter the hex offset and length when prompted.
 #
-# The script creates a plate comment + label for each detected procedure
-# and an EOL comment on every token line.
+# The script creates a label and plate comment (Sub/Function/Declare header and
+# callers) for each detected procedure, an EOL comment on every token line, and
+# a call reference from each resolved local Call token to its callee.
+#
+# Outside Ghidra it runs as a command-line disassembler:
+#   python3 DisassembleVB3PCode.py APP.EXE [--proc 0xOFFSET] [--calls]
 #
 # @category VB3
 # @runtime PyGhidra
@@ -96,8 +104,16 @@ def _get_keyword(tokens, vbdis_string, idx):
 # NE (New Executable) header + RC_DATA resource parser
 # ---------------------------------------------------------------------------
 
+SEG_DATA      = 0x0001
+SEG_RELOCINFO = 0x0100
+
+
 def parse_ne_segments(data):
-    """Parse NE CODE segments. Returns (segments, error_string)."""
+    """Parse NE segments that have file data. Returns (segments, error_string).
+
+    Each segment is a dict with 1-based seg_num, file_off, file_size (a stored
+    size of 0 means 64K) and flags.
+    """
     if data[:2] != b"MZ":
         return None, "Not an MZ executable"
     e_lfanew = struct.unpack_from("<H", data, 0x3C)[0]
@@ -119,13 +135,12 @@ def parse_ne_segments(data):
             continue
         file_off  = lsec * sector_size
         file_size = fsize if fsize != 0 else 0x10000
-        if not (flags & 0x0001):
-            segments.append({"seg_num": i + 1, "file_off": file_off, "file_size": file_size, "flags": flags})
+        segments.append({"seg_num": i + 1, "file_off": file_off, "file_size": file_size, "flags": flags})
     return segments, None
 
 
 def _parse_ne_rcdata_list(data):
-    """Return list of (file_off, byte_size) for all RT_RCDATA resources, in order."""
+    """Return list of (file_off, byte_size, name_id) for all RT_RCDATA resources, in order."""
     if data[:2] != b"MZ":
         return []
     ne_off = struct.unpack_from("<H", data, 0x3C)[0]
@@ -147,9 +162,8 @@ def _parse_ne_rcdata_list(data):
         off += 8
         resources = []
         for _ in range(n_res):
-            r_off  = struct.unpack_from("<H", data, off)[0]
-            r_size = struct.unpack_from("<H", data, off + 2)[0]
-            resources.append((r_off * align, r_size * align))
+            r_off, r_size, _flags, name_id = struct.unpack_from("<HHHH", data, off)
+            resources.append((r_off * align, r_size * align, name_id))
             off += 12
         if type_id == RT_RCDATA:
             return resources
@@ -537,62 +551,421 @@ class VB3Disasm:
 
 
 # ---------------------------------------------------------------------------
-# Ghidra annotation
+# Sub table + call resolution (port of VBDIS3 MODULE10 DoDecompilation:
+# sub0986 / sub0944 / Applyreloc1 / VBAbsOffs, and MODULE6 sub0785)
+#
+#   - The VBModuleDef descriptor segment (VBStartSeg) is the first RELOCINFO
+#     segment other than the initial CS that is at least 256 bytes; some EXEs
+#     put a small stub segment first.
+#   - The sub chain starts at RC_DATA 0x8002 + 86 and links through
+#     VBModuleDef.M1551. VBAbsOffs(t) = seg(VBStartSeg + (t>>13)&3) + (t&0x1FFF)*8.
+#   - SELECTOR relocation chains of the descriptor segment give each local
+#     sub's code segment; code_start = seg_base + VBModuleDef.Offs.
+#   - A Call target T resolves via NamesLookUpTbl[ror3(T)+1] -> sub index.
 # ---------------------------------------------------------------------------
 
-def _fmt_token(rec):
+RT_RCDATA_VB_GLOBAL = 0x8002   # RC_DATA name id holding VB3 global data
+MAX_SUBS = 2000
+
+# VBModuleDef_struc field indexes (u16 words)
+VBMD_SUB_OR_FUNC = 6    # bit 0: 1 = Sub, 0 = Function
+VBMD_IS_LOCAL    = 11   # bit 0: 1 = local, 0 = external Declare
+VBMD_OFFS        = 12   # code offset within the sub's segment
+VBMD_NEXT        = 13   # M1551 chain link
+VBMD_LIB         = 20   # M1587 Lib name (name-pool offset)
+VBMD_ALIAS       = 23   # M159D Alias/proc name (name-pool offset)
+
+CALL_KEYWORDS = ("Call ", "call")
+GC1156 = 5   # flag_token2 kind for an external Declare call ...
+GC1172 = 6   # ... under this access class
+
+
+def _ror3(v):
+    """RotateRight3 (MODULE17)."""
+    return ((v >> 3) & 0x1FFF) | ((v & 6) << 12)
+
+
+class SubInfo:
+    __slots__ = ("idx", "is_local", "is_sub", "offs", "seg", "lib", "alias")
+
+    def __init__(self, idx, vals, lib, alias):
+        self.idx      = idx
+        self.is_local = bool(vals[VBMD_IS_LOCAL] & 1)
+        self.is_sub   = bool(vals[VBMD_SUB_OR_FUNC] & 1)
+        self.offs     = vals[VBMD_OFFS] if self.is_local else -1
+        self.seg      = None   # code segment number, from SELECTOR relocs
+        self.lib      = lib
+        self.alias    = alias
+
+
+class SubTable:
+    """VB3 Sub/Function/Declare table recovered from an NE EXE."""
+
+    def __init__(self, data, segments):
+        self.data = data
+        self.seg_base = {s["seg_num"]: s["file_off"] for s in segments}
+        self.subs = {}         # sub index (1-based) -> SubInfo
+        self.names_tbl = {}    # ror3(chain token) + 1 -> sub index
+        self._by_code_start = None
+        self._load(segments)
+
+    def _u16(self, off):
+        return struct.unpack_from("<H", self.data, off)[0]
+
+    def _load(self, segments):
+        data = self.data
+        ne_off = self._u16(0x3C)
+        initial_cs = self._u16(ne_off + 0x16)
+        start = next(
+            (s for s in segments
+             if (s["flags"] & SEG_RELOCINFO) and s["seg_num"] != initial_cs and s["file_size"] >= 256),
+            None,
+        )
+        rc = [r for r in _parse_ne_rcdata_list(data) if r[2] == RT_RCDATA_VB_GLOBAL]
+        if start is None or not rc:
+            return
+        rc_base = rc[0][0]
+        name_pool = self._name_pool(rc_base)
+        vb_start_seg = start["seg_num"]
+
+        def vb_abs_offs(tok):
+            return self.seg_base.get(vb_start_seg + ((tok >> 13) & 3), 0) + (tok & 0x1FFF) * 8
+
+        link = self._u16(rc_base + 86)
+        seen = set()
+        while link != 0xFFFF and link not in seen and len(self.subs) < MAX_SUBS:
+            seen.add(link)
+            r = _ror3(link)
+            pos = vb_abs_offs(r)
+            if pos + 56 > len(data):
+                break
+            vals = struct.unpack_from("<28H", data, pos)
+            idx = len(self.subs) + 1
+            self.names_tbl[r + 1] = idx
+            is_local = bool(vals[VBMD_IS_LOCAL] & 1)
+            lib = alias = ""
+            if not is_local:
+                lib = self._pool_name(name_pool, vals[VBMD_LIB])
+                alias = self._pool_name(name_pool, vals[VBMD_ALIAS])
+            self.subs[idx] = SubInfo(idx, vals, lib, alias)
+            link = vals[VBMD_NEXT]
+
+        # SELECTOR (type 2), internal-reference relocation chains assign code segments.
+        reloc_base = start["file_off"] + start["file_size"]
+        if reloc_base + 2 > len(data):
+            return
+        nrelocs = self._u16(reloc_base)
+        for i in range(nrelocs):
+            rpos = reloc_base + 2 + i * 8
+            if rpos + 8 > len(data):
+                break
+            src_type, flags_b, src_off, tgt_seg, _ = struct.unpack_from("<BBHHH", data, rpos)
+            if src_type != 2 or (flags_b & 3) != 0:
+                continue
+            chain = src_off
+            hops = 0
+            while chain != 0xFFFF and hops < 0x2000:
+                idx = self.names_tbl.get((chain // 8) - 4 + 1)
+                if idx is not None:
+                    self.subs[idx].seg = tgt_seg
+                chain_pos = start["file_off"] + chain
+                if chain_pos + 2 > len(data):
+                    break
+                chain = self._u16(chain_pos)
+                hops += 1
+
+    def _name_pool(self, rc_base):
+        """(base, size) of the RC_DATA name pool gv0B92 (MODULE4 ScanGlobalData)."""
+        i = 0x60
+        i += 2 + self._u16(rc_base + i)    # gv0B8A block
+        i += 2                              # fBuff1
+        i += 2 + self._u16(rc_base + i)    # gv0B8E block (SomeDataBuff)
+        i += 2 + self._u16(rc_base + i)    # intermediate block
+        size = self._u16(rc_base + i)
+        return rc_base + i + 2, size
+
+    def _pool_name(self, pool, offs):
+        """Read a T2237 name record <M2241:2><M12C8:1><len:1><name> at pool+offs."""
+        pos = pool[0] + offs
+        if pos + 4 > len(self.data):
+            return ""
+        length = self.data[pos + 3]
+        return self.data[pos + 4:pos + 4 + length].decode("latin1", errors="replace")
+
+    def code_start(self, sub):
+        if not sub.is_local or sub.offs <= 0 or sub.seg not in self.seg_base:
+            return None
+        return self.seg_base[sub.seg] + sub.offs
+
+    def sub_at(self, code_start):
+        if self._by_code_start is None:
+            self._by_code_start = {}
+            for sub in self.subs.values():
+                cs = self.code_start(sub)
+                if cs is not None:
+                    self._by_code_start[cs] = sub
+        return self._by_code_start.get(code_start)
+
+    def resolve(self, target):
+        """Call target token -> SubInfo or None."""
+        idx = self.names_tbl.get(_ror3(target) + 1)
+        return self.subs.get(idx) if idx is not None else None
+
+    def resolve_call(self, disasm, rec):
+        """Resolve a Call token record to a SubInfo, or None.
+
+        Internal Sub calls carry the target directly in params[2:4]. External
+        Declare calls (flag_token2 kind gc1156 under gc1172) clear bit 0 first
+        (MODULE11: VarIndex = (raw \\ 2) * 2, then RotateRight3).
+        """
+        if rec.get("kw") not in CALL_KEYWORDS or len(rec["params"]) < 4:
+            return None
+        _, target = struct.unpack_from("<HH", rec["params"])
+        sub = self.resolve(target)
+        if sub is not None and (not sub.is_local or self.code_start(sub) is not None):
+            return sub
+        l01B4, _l01BA, l01BC = disasm._ft2_lookup(rec["tok"])
+        if l01B4 == GC1156 and l01BC == GC1172:
+            return self.resolve(target & 0xFFFE)
+        return None
+
+    def name(self, sub):
+        if not sub.is_local:
+            return sub.alias or f"ext#{sub.idx}"
+        return f"sub#{sub.idx}"
+
+    def target_text(self, sub):
+        if not sub.is_local:
+            return f"{sub.lib.rstrip('.')}:{sub.alias}"
+        cs = self.code_start(sub)
+        return f"{self.name(sub)}@{cs:#x}" if cs is not None else self.name(sub)
+
+    def declaration(self, sub):
+        """MODULE6 sub0785: VB header line for a sub."""
+        kind = "Sub" if sub.is_sub else "Function"
+        if not sub.is_local:
+            return f'Declare {kind} {sub.alias} Lib "{sub.lib.rstrip(".")}"'
+        cs = self.code_start(sub)
+        where = f"@{cs:#x}" if cs is not None else ""
+        return f"{kind} sub#{sub.idx}{where}()"
+
+    def proc_sub(self, recs):
+        """SubInfo whose code_start falls on this procedure's START token.
+
+        VBModuleDef.Offs points just past the START opcode, so the code_start
+        can lie anywhere from the START token up to the next token.
+        """
+        first = recs[0]["off"]
+        last = recs[1]["off"] if len(recs) > 1 else first + 2
+        for cs in range(first, last + 1, 2):
+            sub = self.sub_at(cs)
+            if sub is not None:
+                return sub
+        return None
+
+
+def build_call_graph(subs, disasm, procs):
+    """Return (calls, callers) for decoded procedures.
+
+    calls:   {proc start offset: [(token offset, SubInfo)]}
+    callers: {sub index: set(proc start offset)}
+    """
+    calls, callers = {}, {}
+    for recs in procs:
+        start = recs[0]["off"]
+        for rec in recs:
+            sub = subs.resolve_call(disasm, rec)
+            if sub is None:
+                continue
+            rec["callee"] = sub
+            calls.setdefault(start, []).append((rec["off"], sub))
+            callers.setdefault(sub.idx, set()).add(start)
+    return calls, callers
+
+
+# ---------------------------------------------------------------------------
+# Statement structuring (MODULE13, keyword heuristic) and expression tree
+# (MODULE12, best effort). Readable output, not byte parity with VBDIS3.
+# ---------------------------------------------------------------------------
+
+OPENERS = {"Sub", "Function", "If", "For", "Do", "While", "Select", "Select Case", "With"}
+CLOSERS = {"End Sub", "End Function", "End If", "Next", "Loop", "Wend", "End Select", "End With"}
+MIDDLES = {"Else", "ElseIf", "Case", "Case Else"}
+BINOPS = {"+", "-", "*", "/", "\\", "^", "&", "=", "<>", "<", ">", "<=", ">=",
+          "And", "Or", "Xor", "Eqv", "Imp", "Mod", "Like"}
+UNARY = {"Neg", "Not"}
+
+
+def structure(recs):
+    """Set rec['level'] to the block nesting depth of each token."""
+    level = 0
+    for r in recs:
+        kw = (r.get("kw") or "").strip()
+        if kw in CLOSERS:
+            level = max(0, level - 1)
+            r["level"] = level
+        elif kw in MIDDLES:
+            r["level"] = max(0, level - 1)
+        else:
+            r["level"] = level
+            if kw in OPENERS:
+                level += 1
+    return recs
+
+
+def expr_infix(recs):
+    """Set rec['expr'] to an inferred infix expression where derivable."""
+    stack = []
+    for r in recs:
+        kw = (r.get("kw") or "").strip()
+        expr = None
+        if r.get("cval") is not None:
+            expr = str(r["cval"])
+        elif r.get("str") is not None:
+            expr = '"' + r["str"].decode("latin1", errors="replace") + '"'
+        elif r.get("ann"):
+            expr = r["ann"]
+        elif kw in BINOPS and len(stack) >= 2:
+            rhs = stack.pop()
+            lhs = stack.pop()
+            expr = f"{lhs} {kw} {rhs}"
+        elif kw in UNARY and stack:
+            expr = f"{kw} {stack.pop()}"
+        if expr is not None:
+            stack.append(expr)
+            r["expr"] = expr
+    return recs
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def _is_operator(rec):
+    kw = (rec.get("kw") or "").strip()
+    return kw in BINOPS or kw in UNARY
+
+
+def _fmt_token(rec, subs=None):
     if "bad" in rec:
         return f"<{rec['bad']}> tok={rec['tok']:#06x}"
     p = rec["params"].hex(" ") if rec["params"] else ""
     extra = ""
     if rec["cval"] is not None:
         extra = f" ={rec['cval']}"
-    if rec["str"] is not None:
-        try:
-            extra = f" {rec['str'].decode('latin1')!r}"
-        except Exception:
-            extra = f" {rec['str'].hex()}"
+    elif rec["str"] is not None:
+        extra = f" {rec['str'].decode('latin1', errors='replace')!r}"
+    elif rec.get("kw") in CALL_KEYWORDS and subs is not None:
+        callee = rec.get("callee")
+        extra = f" ->{subs.target_text(callee)}" if callee else " ->?"
     ann = f" [{rec['ann']}]" if rec.get("ann") else ""
-    return f"{rec['kw']:<10} np={rec['np']:>2} {p}{extra}{ann}".rstrip()
+    expr = rec.get("expr")
+    tail = f"  ; {expr}" if expr and _is_operator(rec) else ""
+    indent = "  " * rec.get("level", 0)
+    return f"{indent}{rec['kw']:<10} np={rec['np']:>2} {p}{extra}{ann}{tail}".rstrip()
 
 
-def annotate(program, base_addr, all_procs):
-    from ghidra.program.model.symbol import SourceType
+def _plate(seg_label, i, recs, subs, callers):
+    sub = subs.proc_sub(recs) if subs else None
+    lines = []
+    if sub is not None:
+        lines.append(subs.declaration(sub))
+    lines.append(f"VB3 {seg_label} procedure #{i}  ({len(recs)} tokens)")
+    if sub is not None and callers.get(sub.idx):
+        lines.append("Called from: " + ", ".join(f"{c:#x}" for c in sorted(callers[sub.idx])))
+    return sub, "\n".join(lines)
+
+
+def annotate(program, base_addr, all_procs, subs, callers):
+    from ghidra.program.model.symbol import RefType, SourceType
     listing = program.getListing()
     addr_space = program.getAddressFactory().getDefaultAddressSpace()
     symbol_table = program.getSymbolTable()
-    total = 0
+    ref_mgr = program.getReferenceManager()
+    total = refs = 0
     for seg_label, procs in all_procs:
         for i, recs in enumerate(procs):
             addr = addr_space.getAddress(base_addr + recs[0]["off"])
-            label = f"{seg_label}_proc_{i:04d}"
-            plate = f"VB3 {seg_label} procedure #{i}  ({len(recs)} tokens)"
+            sub, plate = _plate(seg_label, i, recs, subs, callers)
+            label = f"vb3_sub{sub.idx}" if sub is not None else f"{seg_label}_proc_{i:04d}"
             cu = listing.getCodeUnitAt(addr)
             if cu:
                 cu.setComment(cu.PLATE_COMMENT, plate)
-            symbol_table.createLabel(addr, label, SourceType.ANALYSIS)
+            symbol_table.createLabel(addr, label, SourceType.ANALYSIS).setPrimary()
             for rec in recs:
                 tok_addr = addr_space.getAddress(base_addr + rec["off"])
                 cu = listing.getCodeUnitAt(tok_addr)
                 if cu:
-                    cu.setComment(cu.EOL_COMMENT, _fmt_token(rec))
+                    cu.setComment(cu.EOL_COMMENT, _fmt_token(rec, subs))
+                callee = rec.get("callee")
+                target = subs.code_start(callee) if callee is not None else None
+                if target is not None:
+                    ref_mgr.addMemoryReference(
+                        tok_addr, addr_space.getAddress(base_addr + target),
+                        RefType.UNCONDITIONAL_CALL, SourceType.ANALYSIS, -1,
+                    )
+                    refs += 1
             total += 1
-    return total
+    return total, refs
+
+
+def decode_all(disasm, data, regions, type_state_for=None):
+    """Decode every region; returns [(label, procs)] with structure/expr applied."""
+    all_procs = []
+    for label, rstart, rend in regions:
+        type_state = type_state_for() if type_state_for else None
+        procs = disasm.find_procedures(rstart, rend, type_state=type_state)
+        for recs in procs:
+            structure(recs)
+            expr_infix(recs)
+        if procs:
+            all_procs.append((label, procs))
+    return all_procs
+
+
+def pcode_regions(disasm, segments):
+    return [
+        (f"seg{s['seg_num']:02d}", s["file_off"], s["file_off"] + s["file_size"])
+        for s in segments
+        if not (s["flags"] & SEG_DATA) and disasm.probe_pcode(s["file_off"], s["file_size"])
+    ]
+
+
+
+
+def type_state_factory(vb3res):
+    """TypeState builder using the largest module's locals (heuristic for single-module apps)."""
+    if not (vb3res and vb3res.modules):
+        return None
+    best = max(vb3res.modules, key=lambda m: vb3res.load_module_locals(m["mfrmOffset"])[1])
+    arr, count = vb3res.load_module_locals(best["mfrmOffset"])
+    if count <= 0:
+        return None
+    return lambda: TypeState(count, arr)
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main (Ghidra)
 # ---------------------------------------------------------------------------
+
+def _table_dir():
+    script_dir = getSourceFile().getParentFile().getAbsolutePath()
+    if os.path.exists(os.path.join(script_dir, "vbdis3i.dat")):
+        return script_dir
+    chosen = askDirectory("Select VBDIS3 directory (contains vbdis3i.dat)", "OK").getAbsolutePath()
+    if os.path.exists(os.path.join(chosen, "vbdis3i.dat")):
+        return chosen
+    return None
+
 
 def main():
-    vbdis_dir = askDirectory("Select VBDIS3 directory (contains vbdis3i.dat)", "OK").getAbsolutePath()
-    if not os.path.exists(os.path.join(vbdis_dir, "vbdis3i.dat")):
+    vbdis_dir = _table_dir()
+    if vbdis_dir is None:
         popup("vbdis3i.dat not found in selected directory. Aborting.")
         return
 
     program = currentProgram
     mem = program.getMemory()
-    addr_space = program.getAddressFactory().getDefaultAddressSpace()
     min_addr = mem.getMinAddress()
     max_addr = mem.getMaxAddress()
     total_len = int(str(max_addr.subtract(min_addr))) + 1
@@ -607,24 +980,21 @@ def main():
     disasm = VB3Disasm(vbdis_dir, data)
     println(f"Loaded {len(disasm.tokens)} opcodes.")
 
-    # Try to load per-module type data from RC_DATA resources
     vb3res = parse_vb3_resources(data)
     if vb3res:
         println(f"VB3 resources: {len(vb3res.modules)} module(s) found.")
     else:
         println("VB3 resource parse: not available (raw dump or unsupported format).")
 
-    # Try NE auto-detect
     segments, err = parse_ne_segments(data)
     regions = []
-
+    subs = None
     if segments is not None:
-        println(f"NE header: {len(segments)} CODE segments.")
-        pcode_segs = [s for s in segments if disasm.probe_pcode(s["file_off"], s["file_size"])]
-        println(f"  {len(pcode_segs)} look like p-code.")
-        for s in pcode_segs:
-            label = f"seg{s['seg_num']:02d}"
-            regions.append((label, s["file_off"], s["file_off"] + s["file_size"]))
+        regions = pcode_regions(disasm, segments)
+        println(f"NE header: {len(segments)} segments, {len(regions)} look like p-code.")
+        subs = SubTable(data, segments)
+        externals = sum(1 for s in subs.subs.values() if not s.is_local)
+        println(f"Sub table: {len(subs.subs)} subs ({externals} external Declares).")
     else:
         println(f"NE auto-detect: {err}. Falling back to manual region entry.")
 
@@ -646,30 +1016,70 @@ def main():
         regions.append(("manual", rstart, rstart + rlen))
 
     println("Scanning for procedures ...")
-    all_procs = []
-    for label, rstart, rend in regions:
-        # Build a TypeState for this segment if we have resource data
-        type_state = None
-        if vb3res and vb3res.modules:
-            # Use the largest module's locals (heuristic for single-module apps)
-            best = max(vb3res.modules, key=lambda m: vb3res.load_module_locals(m["mfrmOffset"])[1])
-            arr, count = vb3res.load_module_locals(best["mfrmOffset"])
-            if count > 0:
-                type_state = TypeState(count, arr)
-
-        procs = disasm.find_procedures(rstart, rend, type_state=type_state)
+    all_procs = decode_all(disasm, data, regions, type_state_factory(vb3res))
+    for label, procs in all_procs:
         println(f"  {label}: {len(procs)} procedures")
-        if procs:
-            all_procs.append((label, procs))
 
     total_procs = sum(len(p) for _, p in all_procs)
     if total_procs == 0:
         popup("No coherent procedures found. Check region offsets and token tables.")
         return
 
+    callers = {}
+    if subs is not None:
+        _, callers = build_call_graph(subs, disasm, [r for _, procs in all_procs for r in procs])
+
     println(f"Annotating {total_procs} procedures ...")
-    n = annotate(program, base_addr, all_procs)
-    println(f"Done — annotated {n} procedures across {len(all_procs)} segment(s).")
+    n, refs = annotate(program, base_addr, all_procs, subs, callers)
+    println(f"Done — annotated {n} procedures across {len(all_procs)} segment(s), {refs} call references.")
 
 
-main()
+# ---------------------------------------------------------------------------
+# Command line (outside Ghidra)
+# ---------------------------------------------------------------------------
+
+def cli(argv):
+    import argparse
+    ap = argparse.ArgumentParser(description="Disassemble VB3 p-code from an NE EXE.")
+    ap.add_argument("exe")
+    ap.add_argument("--tables", default=os.path.dirname(os.path.abspath(__file__)),
+                    help="directory containing vbdis3i.dat and vbdis3x.dat")
+    ap.add_argument("--proc", type=lambda v: int(v, 0),
+                    help="only print the procedure containing this file offset")
+    ap.add_argument("--calls", action="store_true", help="print the call graph instead of tokens")
+    args = ap.parse_args(argv)
+
+    data = open(args.exe, "rb").read()
+    disasm = VB3Disasm(args.tables, data)
+    segments, err = parse_ne_segments(data)
+    if segments is None:
+        raise SystemExit(f"{args.exe}: {err}")
+    subs = SubTable(data, segments)
+    all_procs = decode_all(disasm, data, pcode_regions(disasm, segments),
+                           type_state_factory(parse_vb3_resources(data)))
+    procs = [(label, i, recs) for label, ps in all_procs for i, recs in enumerate(ps)]
+    calls, callers = build_call_graph(subs, disasm, [recs for _, _, recs in procs])
+
+    if args.calls:
+        for label, i, recs in procs:
+            sub = subs.proc_sub(recs)
+            name = subs.declaration(sub) if sub else f"{label}_proc_{i:04d}"
+            for off, callee in calls.get(recs[0]["off"], []):
+                print(f"{recs[0]['off']:#08x} {name} @{off:#08x} -> {subs.target_text(callee)}")
+        return
+
+    for label, i, recs in procs:
+        if args.proc is not None and not (recs[0]["off"] <= args.proc <= recs[-1]["off"]):
+            continue
+        _, plate = _plate(label, i, recs, subs, callers)
+        print("\n".join(f"; {line}" for line in plate.splitlines()))
+        for rec in recs:
+            print(f"{rec['off']:#08x}: {_fmt_token(rec, subs)}")
+        print()
+
+
+if "currentProgram" in globals():
+    main()
+elif __name__ == "__main__":
+    import sys
+    cli(sys.argv[1:])
