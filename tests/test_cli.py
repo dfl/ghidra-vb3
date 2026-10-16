@@ -43,6 +43,30 @@ class DescriptorOffsetTest(unittest.TestCase):
         self.assertEqual(vb3._desc_offset(0x0990), 0x0990)
 
 
+class ParamProfileTest(unittest.TestCase):
+    def test_event_params_add_index_for_control_arrays(self):
+        click = vb3.Event("Click", 0, "", 0)
+        self.assertEqual(vb3.event_params(click, True), ["Index As Integer"])
+        key = vb3.Event("KeyPress", 1, "", 9)
+        self.assertEqual(vb3.event_params(key, False), ["KeyAscii As Integer"])
+        custom = vb3.Event("Change", 2, "Value As Integer, Shift As Integer", -1)
+        self.assertEqual(vb3.event_params(custom, False), ["Value As Integer", "Shift As Integer"])
+
+
+class DeclareParamsTest(unittest.TestCase):
+    def test_byref_argument_becomes_as_any(self):
+        calls = [[vb3.ExternArg(by_ref=True), vb3.ExternArg(typ="Integer")]]
+        self.assertEqual(vb3.infer_declare_params(calls, [-1]), ["p1 As Any", "ByVal p2%"])
+
+    def test_byval_string(self):
+        self.assertEqual(vb3.infer_declare_params([[vb3.ExternArg(by_val_string=True)]], [-1]), ["ByVal p1$"])
+
+    def test_unknown_types_resolved_by_argument_bytes(self):
+        # Two unknown arguments filling 4 bytes can only be Integers.
+        calls = [[vb3.ExternArg(), vb3.ExternArg()]]
+        self.assertEqual(vb3.infer_declare_params(calls, [4]), ["ByVal p1%", "ByVal p2%"])
+
+
 class NonNeTest(unittest.TestCase):
     def test_json_error_for_non_ne_input(self):
         with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
@@ -98,6 +122,41 @@ class SampleTest(unittest.TestCase):
             self.assertIsNotNone(proc, f"sub {sub['index']} at {sub['code_start']:#x}")
             self.assertEqual(proc["sub"], sub["index"])
             self.assertEqual(proc["end"], sub["code_end"])
+
+    def test_event_procedures_are_named_after_owner_and_event(self):
+        events = [s for s in self.out["subs"] if s["event"] is not None]
+        if not self.out["control_models"]["vbrun300"]:
+            self.skipTest("VBRUN300.DLL not found next to the sample")
+        self.assertTrue(events)
+        for sub in events:
+            if sub["event"]["event"] is None:
+                # Bound to a control whose model is unavailable: keep the generic name.
+                self.assertRegex(sub["name"], r"^(sub|fn)[0-9A-F]{4}$")
+                continue
+            self.assertEqual(sub["name"], f"{sub['event']['owner']}_{sub['event']['event']}")
+            self.assertIsNotNone(sub["params"])
+        names = {}
+        for sub in self.out["subs"]:
+            key = (sub["module"], sub["name"])
+            self.assertNotIn(key, names, f"duplicate {sub['name']} in module {sub['module']:#x}")
+            names[key] = sub["index"]
+
+    def test_called_declares_have_parameter_lists(self):
+        called = {c["callee"] for p in self.out["procedures"] for c in p["calls"]}
+        for sub in self.out["subs"]:
+            if not sub["local"] and sub["index"] in called:
+                self.assertIsNotNone(sub["params"], sub["declaration"])
+                self.assertIn(" Lib ", sub["declaration"])
+
+    def test_forms_list_controls_and_modules(self):
+        modules = {s["module"] for s in self.out["subs"]}
+        self.assertTrue(self.out["forms"])
+        for form in self.out["forms"]:
+            self.assertTrue(form["name"])
+            for control in form["controls"]:
+                self.assertGreater(control["id"], 0)
+                self.assertTrue(control["name"])
+        self.assertTrue(any(f["module"] in modules for f in self.out["forms"]))
 
     def test_proc_filter_returns_containing_procedure(self):
         proc = self.out["procedures"][len(self.out["procedures"]) // 2]
