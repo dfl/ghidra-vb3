@@ -79,6 +79,13 @@ Sub Main ()
     Case_string_len_only
     Case_string_passed_byref
     Case_long_compare_literal
+    Case_int_static_array
+    Case_long_static_array
+    Case_single_static_array
+    Case_double_static_array
+    Case_currency_static_array
+    Case_variant_static_array
+    Case_string_static_array
 End Sub
 
 Sub Case_int_local ()
@@ -113,7 +120,7 @@ End Sub
 
 Sub Case_int_array ()
     Mark = "CASE int_array"
-    Dim v(1 To 3) As Integer
+    ReDim v(1 To 3) As Integer
     v(2) = 1
     Tmp = v(2)
 End Sub
@@ -150,7 +157,7 @@ End Sub
 
 Sub Case_long_array ()
     Mark = "CASE long_array"
-    Dim v(1 To 3) As Long
+    ReDim v(1 To 3) As Long
     v(2) = 100000
     Tmp = v(2)
 End Sub
@@ -187,7 +194,7 @@ End Sub
 
 Sub Case_single_array ()
     Mark = "CASE single_array"
-    Dim v(1 To 3) As Single
+    ReDim v(1 To 3) As Single
     v(2) = 1.5
     Tmp = v(2)
 End Sub
@@ -224,7 +231,7 @@ End Sub
 
 Sub Case_double_array ()
     Mark = "CASE double_array"
-    Dim v(1 To 3) As Double
+    ReDim v(1 To 3) As Double
     v(2) = 2.25
     Tmp = v(2)
 End Sub
@@ -261,7 +268,7 @@ End Sub
 
 Sub Case_currency_array ()
     Mark = "CASE currency_array"
-    Dim v(1 To 3) As Currency
+    ReDim v(1 To 3) As Currency
     v(2) = 3.75
     Tmp = v(2)
 End Sub
@@ -298,7 +305,7 @@ End Sub
 
 Sub Case_variant_array ()
     Mark = "CASE variant_array"
-    Dim v(1 To 3) As Variant
+    ReDim v(1 To 3) As Variant
     v(2) = 4
     Tmp = v(2)
 End Sub
@@ -335,7 +342,7 @@ End Sub
 
 Sub Case_string_array ()
     Mark = "CASE string_array"
-    Dim v(1 To 3) As String
+    ReDim v(1 To 3) As String
     v(2) = "s"
     Tmp = v(2)
 End Sub
@@ -379,3 +386,51 @@ Sub Case_long_compare_literal ()
     If v > 100000 Then Tmp = 1
 End Sub
 
+Sub Case_int_static_array ()
+    Mark = "CASE int_static_array"
+    Static v(1 To 3) As Integer
+    v(2) = 1
+    Tmp = v(2)
+End Sub
+
+Sub Case_long_static_array ()
+    Mark = "CASE long_static_array"
+    Static v(1 To 3) As Long
+    v(2) = 100000
+    Tmp = v(2)
+End Sub
+
+Sub Case_single_static_array ()
+    Mark = "CASE single_static_array"
+    Static v(1 To 3) As Single
+    v(2) = 1.5
+    Tmp = v(2)
+End Sub
+
+Sub Case_double_static_array ()
+    Mark = "CASE double_static_array"
+    Static v(1 To 3) As Double
+    v(2) = 2.25
+    Tmp = v(2)
+End Sub
+
+Sub Case_currency_static_array ()
+    Mark = "CASE currency_static_array"
+    Static v(1 To 3) As Currency
+    v(2) = 3.75
+    Tmp = v(2)
+End Sub
+
+Sub Case_variant_static_array ()
+    Mark = "CASE variant_static_array"
+    Static v(1 To 3) As Variant
+    v(2) = 4
+    Tmp = v(2)
+End Sub
+
+Sub Case_string_static_array ()
+    Mark = "CASE string_static_array"
+    Static v(1 To 3) As String
+    v(2) = "s"
+    Tmp = v(2)
+End Sub

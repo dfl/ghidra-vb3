@@ -10,7 +10,10 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "ghidra_scripts", "DisassembleVB3PCode.py")
 SAMPLE = os.environ.get("VB3_SAMPLE")
-TYPES_EXE = os.environ.get("VB3_TYPES_EXE")
+TYPES_EXE = os.environ.get("VB3_TYPES_EXE", os.path.join(ROOT, "tests", "vb3", "types", "TYPES.EXE"))
+if not os.path.exists(TYPES_EXE):
+    TYPES_EXE = None
+VBX_DIR = os.environ.get("VB3_VBX_DIR")
 
 spec = importlib.util.spec_from_file_location("vb3", SCRIPT)
 vb3 = importlib.util.module_from_spec(spec)
@@ -102,6 +105,14 @@ class VariableTypeTest(unittest.TestCase):
 
     def test_no_evidence_is_unknown(self):
         self.assertEqual((self.var().type, self.var().type_source), (None, None))
+
+
+class ConversionTest(unittest.TestCase):
+    def test_variant_conversions_identify_their_source_type(self):
+        # Observed in tests/vb3/types/TYPES.EXE: Tmp = v for each declared type.
+        self.assertEqual({t: vb3.COERCION_SOURCES[t] for t in (0x0EB0, 0x0F1C, 0x10F1, 0x1102, 0x1156, 0x11C3)},
+                         {0x0EB0: "Integer", 0x0F1C: "Long", 0x10F1: "Single", 0x1102: "Double",
+                          0x1156: "Currency", 0x11C3: "String"})
 
 
 class NonNeTest(unittest.TestCase):
@@ -245,8 +256,10 @@ class SampleTest(unittest.TestCase):
 @unittest.skipUnless(TYPES_EXE, "VB3_TYPES_EXE not set (see tests/vb3/README.md)")
 class GroundTruthTypesTest(unittest.TestCase):
     def test_recorded_types_match_declarations(self):
-        result = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "score_types.py"),
-                                 TYPES_EXE, "--strict"], capture_output=True, text=True)
+        args = [sys.executable, os.path.join(ROOT, "tests", "score_types.py"), TYPES_EXE, "--strict"]
+        if VBX_DIR:
+            args += ["--vbx-dir", VBX_DIR]
+        result = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

@@ -1,6 +1,6 @@
 """Score variable storage and type recovery against a compiled ground-truth program.
 
-Usage: python3 tests/score_types.py TYPES.EXE [tests/vb3/types/expected.json] [--strict]
+Usage: python3 tests/score_types.py TYPES.EXE [expected.json] [--vbx-dir DIR] [--strict]
 
 Each case procedure assigns the marker string "CASE <name>" to a global and has
 exactly one other variable, the one under test. The report counts matches by
@@ -24,12 +24,12 @@ def load_tool():
     return vb3
 
 
-def score(exe, expected_path):
+def score(exe, expected_path, search_dirs=()):
     vb3 = load_tool()
     with open(exe, "rb") as f:
         data = f.read()
     tables = os.path.dirname(SCRIPT)
-    analysis, err = vb3.analyze(data, tables, [os.path.dirname(os.path.abspath(exe))])
+    analysis, err = vb3.analyze(data, tables, list(search_dirs) + [os.path.dirname(os.path.abspath(exe))])
     if analysis is None:
         raise SystemExit(f"{exe}: {err}")
     with open(expected_path) as f:
@@ -62,7 +62,10 @@ def score(exe, expected_path):
         if "array" in want:
             got["array"] = v.array
         if "name" in want:
-            got["name"] = v.name
+            if analysis["models"].vbrun_path is None:
+                want = {k: x for k, x in want.items() if k != "name"}   # names need VBRUN300.DLL
+            else:
+                got["name"] = v.name
         ok = all(got.get(k) == want[k] for k in want)
         detail = f"{v.name} {v.storage} {v.type or '?'}"
         if v.recorded or v.inferred:
@@ -74,11 +77,16 @@ def score(exe, expected_path):
 def main(argv):
     strict = "--strict" in argv
     args = [a for a in argv if a != "--strict"]
+    search_dirs = []
+    while "--vbx-dir" in args:
+        i = args.index("--vbx-dir")
+        search_dirs.append(args[i + 1])
+        del args[i:i + 2]
     if not args:
         raise SystemExit(__doc__)
     exe = args[0]
     expected = args[1] if len(args) > 1 else DEFAULT_EXPECTED
-    results = score(exe, expected)
+    results = score(exe, expected, search_dirs)
     totals = {}
     for name, status, source, want, detail in results:
         key = source or "unknown"

@@ -37,16 +37,22 @@ never mixed silently:
 
 - **recorded**: the data type each reference's control token says the opcode
   accesses, array descriptors in module data, and `ReDim ... As` clauses;
-- **inferred** (shown with `~`): usage rules from vb3dec, each named in the
-  JSON evidence: scalar assignments, `Len`/`Asc`/`Mid$`/`Left$`/`Right$`/`InStr`
-  arguments, comparisons with Long literals, event signatures and call-site
-  argument types.
+- **inferred** (shown with `~`): usage rules, each named in the JSON evidence:
+  the source type of a conversion applied to the variable's value, scalar
+  assignments through an explicit conversion or of a String, `Len`/`Asc`/
+  `Mid$`/`Left$`/`Right$`/`InStr` arguments, comparisons with Long literals,
+  event signatures and call-site argument types (mostly from vb3dec).
 
 Disagreeing evidence is reported as a conflict; no evidence leaves the type
 unknown (`?`) rather than defaulting to Variant. `Static` locals and module
 variables share module data, so a module variable used by one procedure is
-listed in its plate as a `Static` candidate. `tests/vb3/` holds a ground-truth
-program for measuring this against declared types.
+listed in its plate as a `Static` candidate.
+
+`tests/vb3/types/` is a ground-truth program compiled with VB3: 57 variables
+covering every type as a local, ByRef/ByVal parameter, `Static`, module-level
+and global variable, `ReDim` and `Static` arrays, a `Form` object, event
+parameters and usage-only cases. All 57 storage classes and types are
+recovered (53 recorded, 4 inferred); `tests/score_types.py` reports it.
 
 Scope is intentionally limited to **opcode + params per token**, with call
 resolution and light structuring on top. It does not reconstruct VB source.

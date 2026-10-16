@@ -25,6 +25,11 @@
       "storage": "module",
       "type": "Currency"
     },
+    "currency_static_array": {
+      "array": true,
+      "storage": "module",
+      "type": "Currency"
+    },
     "double_array": {
       "array": true,
       "storage": "local",
@@ -52,6 +57,11 @@
       "type": "Double"
     },
     "double_static": {
+      "storage": "module",
+      "type": "Double"
+    },
+    "double_static_array": {
+      "array": true,
       "storage": "module",
       "type": "Double"
     },
@@ -94,6 +104,11 @@
       "storage": "module",
       "type": "Integer"
     },
+    "int_static_array": {
+      "array": true,
+      "storage": "module",
+      "type": "Integer"
+    },
     "long_array": {
       "array": true,
       "storage": "local",
@@ -127,6 +142,11 @@
       "storage": "module",
       "type": "Long"
     },
+    "long_static_array": {
+      "array": true,
+      "storage": "module",
+      "type": "Long"
+    },
     "single_array": {
       "array": true,
       "storage": "local",
@@ -149,6 +169,11 @@
       "type": "Single"
     },
     "single_static": {
+      "storage": "module",
+      "type": "Single"
+    },
+    "single_static_array": {
+      "array": true,
       "storage": "module",
       "type": "Single"
     },
@@ -185,6 +210,11 @@
       "storage": "module",
       "type": "String"
     },
+    "string_static_array": {
+      "array": true,
+      "storage": "module",
+      "type": "String"
+    },
     "variant_array": {
       "array": true,
       "storage": "local",
@@ -207,6 +237,11 @@
       "type": "Variant"
     },
     "variant_static": {
+      "storage": "module",
+      "type": "Variant"
+    },
+    "variant_static_array": {
+      "array": true,
       "storage": "module",
       "type": "Variant"
     }

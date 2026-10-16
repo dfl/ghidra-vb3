@@ -1492,11 +1492,18 @@ TOK_BYVAL = (0x6A63, 0x6A02)
 ALT_UNARY_MINUS = 0x00F9
 CTL_KIND_ADDRESS = 8
 CTL_MODE_VALUE4 = 14            # 4-byte value of a local, not its address
-# C<typ> coercion tokens -> target type (from the assignments consuming them)
+# C<typ> coercion tokens -> target type (vb3dec, from the assignments consuming them)
 COERCION_TARGETS = {
     0x0E7B: "Long", 0x0EB0: "Variant", 0x0EC5: "Integer", 0x0F1C: "Variant",
     0x0F67: "Integer", 0x0F7B: "Long", 0x1050: "Integer", 0x1060: "Long",
     0x106D: "Single", 0x10A3: "String", 0x11C3: "Variant",
+    0x10F1: "Variant", 0x1102: "Variant", 0x1156: "Variant",
+}
+# C<typ> conversions to Variant -> the type they convert from, observed in the
+# ground-truth program tests/vb3/types (Tmp = v for each declared type)
+COERCION_SOURCES = {
+    0x0EB0: "Integer", 0x0F1C: "Long", 0x10F1: "Single", 0x1102: "Double",
+    0x1156: "Currency", 0x11C3: "String",
 }
 CONST_TYPES = {"c%": "Integer", "c&": "Long", "c!": "Single", "c#": "Double", "c@": "Currency", "c$": "String"}
 STRING_FUNCS = {"LCase$", "UCase$", "Mid$", "Left$", "Right$", "Chr$", "String$", "Space$",
@@ -1776,6 +1783,8 @@ def simulate(subs, disasm, procs, variables):
                     stack.append(_StackItem(var.type if var is not None else "", var=var))
             elif kw == "C<typ>":
                 if stack:
+                    if stack[-1].var is not None and tok in COERCION_SOURCES:
+                        stack[-1].var.infer(COERCION_SOURCES[tok], "conversion-source")
                     stack[-1].coerced = COERCION_TARGETS.get(tok, "")
             elif kw in ("var", "pop.var"):
                 mode = disasm.control_token[tok] if tok < len(disasm.control_token) else 0
@@ -1793,14 +1802,18 @@ def simulate(subs, disasm, procs, variables):
                 stack.append(item)
             elif kw.startswith("var"):
                 # assignments: var=, var()= (array element, indices first). Only
-                # scalar assignments type the variable: array element stores
-                # convert to the element type themselves.
+                # scalar assignments type the variable, and only through an
+                # explicit conversion or a String value: store opcodes convert
+                # numeric values themselves (a Single assigned a Double literal
+                # has no conversion token).
                 if kw.startswith("var()") and words:
                     for _ in range(min(words[0], len(stack)) if words[0] < 0x8000 else 0):
                         pop()
                 value = pop()
-                if var is not None and value.value_type and kw.startswith("var="):
-                    var.infer(value.value_type, "assign")
+                typed = value.coerced if value.coerced is not None else (
+                    "String" if value.typ == "String" else "")
+                if var is not None and typed and kw.startswith("var="):
+                    var.infer(typed, "assign")
             elif tok in TOK_BYVAL:
                 pass
             elif kw == "&":
