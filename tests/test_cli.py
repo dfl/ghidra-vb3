@@ -28,6 +28,21 @@ class InlineStringTest(unittest.TestCase):
         self.assertEqual(vb3._inline_string(b"\x00\x00\xff\x00ab"), b"\x00\x00\xff\x00ab")
 
 
+class AnsiTextTest(unittest.TestCase):
+    def test_decodes_windows_1252(self):
+        self.assertEqual(vb3._ansi_text(b"\x3e\x97\x97\xbb\x9b\xbb"), ">\u2014\u2014\u00bb\u203a\u00bb")
+
+    def test_keeps_undefined_bytes(self):
+        self.assertEqual(vb3._ansi_text(b"a\x81b"), "a\x81b")
+
+
+class DescriptorOffsetTest(unittest.TestCase):
+    def test_ignores_flag_bits(self):
+        # Low three bits of a chain token are flags, not part of the descriptor offset.
+        self.assertEqual(vb3._desc_offset(0x0996), 0x0990)
+        self.assertEqual(vb3._desc_offset(0x0990), 0x0990)
+
+
 class NonNeTest(unittest.TestCase):
     def test_json_error_for_non_ne_input(self):
         with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
@@ -73,6 +88,16 @@ class SampleTest(unittest.TestCase):
         starts = {p["start"] for p in self.out["procedures"]}
         for proc in self.out["procedures"]:
             self.assertTrue(set(proc["callers"]) <= starts)
+
+    def test_every_local_sub_is_decoded_over_its_descriptor_bounds(self):
+        by_start = {p["start"]: p for p in self.out["procedures"]}
+        for sub in self.out["subs"]:
+            if not sub["local"] or sub["code_start"] is None:
+                continue
+            proc = by_start.get(sub["code_start"])
+            self.assertIsNotNone(proc, f"sub {sub['index']} at {sub['code_start']:#x}")
+            self.assertEqual(proc["sub"], sub["index"])
+            self.assertEqual(proc["end"], sub["code_end"])
 
     def test_proc_filter_returns_containing_procedure(self):
         proc = self.out["procedures"][len(self.out["procedures"]) // 2]

@@ -359,6 +359,14 @@ def _signed16(v):
     return v - 0x10000 if v >= 0x8000 else v
 
 
+CP1252_UNDEFINED = {0x81, 0x8D, 0x8F, 0x90, 0x9D}
+
+
+def _ansi_text(raw):
+    """Display text for VB3 ANSI (Windows-1252) bytes; undefined bytes map to U+0080..U+009F."""
+    return "".join(chr(b) if b in CP1252_UNDEFINED else bytes([b]).decode("cp1252") for b in raw)
+
+
 def _inline_string(params):
     """String constant payload: <link:u16><length:u16><chars>, NUL-padded."""
     if len(params) >= 4:
@@ -483,9 +491,10 @@ class VB3Disasm:
         access = "a" if (l01BC == 4) else "v"  # gc116E=4 = array element
         return f"{kind_char}{access}{slot_hex}{type_suffix}"
 
-    def walk(self, start, end, max_tokens=4000, type_state=None):
+    def walk(self, start, end, max_tokens=4000, type_state=None, stop_at_finish=True):
         """
-        Yield decoded tokens. Each record includes:
+        Yield decoded tokens until end, a FINISH token (unless stop_at_finish
+        is False), or a decode failure. Each record includes:
           'ann': type annotation string (VBDIS3 M26A6 style), may be ''
         If type_state is provided, annotations use its gLocalVarsTypeBuff;
         the walk also calls process_type() to build the state incrementally.
@@ -529,7 +538,7 @@ class VB3Disasm:
 
             yield rec
             n += 1
-            if d["low_nibble"] == CASE_FINISH:
+            if stop_at_finish and d["low_nibble"] == CASE_FINISH:
                 return
             if next_off <= off:
                 yield {"off": off, "tok": int_tokens, "bad": "no-progress"}
@@ -611,13 +620,20 @@ class VB3Disasm:
 #     segment other than the initial CS that is at least 256 bytes; some EXEs
 #     put a small stub segment first.
 #   - The sub chain starts at RC_DATA 0x8002 + 86 and links through
-#     VBModuleDef.M1551. VBAbsOffs(t) = seg(VBStartSeg + (t>>13)&3) + (t&0x1FFF)*8.
-#   - SELECTOR relocation chains of the descriptor segment give each local
-#     sub's code segment; code_start = seg_base + VBModuleDef.Offs.
-#   - A Call target T resolves via NamesLookUpTbl[ror3(T)+1] -> sub index.
+#     VBModuleDef.M1551. A chain token's descriptor lies at token & 0xFFF8 in
+#     VBStartSeg; the low three bits are flags. VBDIS3 instead indexed by
+#     RotateRight3(token), which moves those flags into bits 13-15: its
+#     VBAbsOffs then picked the wrong segment and Applyreloc1, which indexes
+#     without rotating, missed the descriptor and dropped the procedure (see
+#     vb3dec docs/audit_vbdis3.md 1.1 and 1.3).
+#   - SELECTOR relocation chains of the descriptor segment link the descriptors
+#     (at descriptor + 0x26) of each code segment's local subs.
+#   - A local sub's code is [seg_base + Offs, seg_base + codeSize).
 # ---------------------------------------------------------------------------
 
 MAX_SUBS = 2000
+DESC_SIZE = 56
+DESC_RELOC_LINK = 0x26   # relocation chain link within a descriptor
 
 # VBModuleDef_struc field indexes (u16 words)
 VBMD_SUB_OR_FUNC = 6    # bit 0: 1 = Sub, 0 = Function
@@ -625,6 +641,7 @@ VBMD_MODULE      = 10   # owning module id
 VBMD_IS_LOCAL    = 11   # bit 0: 1 = local, 0 = external Declare
 VBMD_OFFS        = 12   # code offset within the sub's segment
 VBMD_NEXT        = 13   # M1551 chain link
+VBMD_CODE_SIZE   = 18   # code end offset within the sub's segment
 VBMD_LIB         = 20   # M1587 Lib name (name-pool offset)
 VBMD_ALIAS       = 23   # M159D Alias/proc name (name-pool offset)
 
@@ -637,19 +654,21 @@ GC1156 = 5
 GC1172 = 6
 
 
-def _ror3(v):
-    """RotateRight3 (MODULE17)."""
-    return ((v >> 3) & 0x1FFF) | ((v & 6) << 12)
+def _desc_offset(token):
+    """Descriptor offset in VBStartSeg named by a Sub chain token."""
+    return token & 0xFFF8
 
 
 class SubInfo:
-    __slots__ = ("idx", "is_local", "is_sub", "offs", "seg", "module", "lib", "alias")
+    __slots__ = ("idx", "desc", "is_local", "is_sub", "offs", "code_size", "seg", "module", "lib", "alias")
 
-    def __init__(self, idx, vals, lib, alias):
+    def __init__(self, idx, desc, vals, lib, alias):
         self.idx      = idx
+        self.desc     = desc   # descriptor offset in VBStartSeg
         self.is_local = bool(vals[VBMD_IS_LOCAL] & 1)
         self.is_sub   = bool(vals[VBMD_SUB_OR_FUNC] & 1)
         self.offs     = vals[VBMD_OFFS] if self.is_local else -1
+        self.code_size = vals[VBMD_CODE_SIZE] if self.is_local else -1
         self.seg      = None   # code segment number, from SELECTOR relocs
         self.module   = vals[VBMD_MODULE]
         self.lib      = lib
@@ -664,7 +683,7 @@ class SubTable:
         self.globals = globals_
         self.seg_base = {s["seg_num"]: s["file_off"] for s in segments}
         self.subs = {}         # sub index (1-based) -> SubInfo
-        self.names_tbl = {}    # ror3(chain token) + 1 -> sub index
+        self.by_desc = {}      # descriptor offset -> sub index
         self._by_code_start = None
         self._load(segments)
 
@@ -683,28 +702,24 @@ class SubTable:
         if start is None or self.globals.base is None:
             return
         rc_base = self.globals.base
-        vb_start_seg = start["seg_num"]
-
-        def vb_abs_offs(tok):
-            return self.seg_base.get(vb_start_seg + ((tok >> 13) & 3), 0) + (tok & 0x1FFF) * 8
+        desc_end = start["file_size"]
 
         link = self._u16(rc_base + 86)
         seen = set()
         while link != 0xFFFF and link not in seen and len(self.subs) < MAX_SUBS:
             seen.add(link)
-            r = _ror3(link)
-            pos = vb_abs_offs(r)
-            if pos + 56 > len(data):
+            desc = _desc_offset(link)
+            if desc + DESC_SIZE > desc_end:
                 break
-            vals = struct.unpack_from("<28H", data, pos)
+            vals = struct.unpack_from("<28H", data, start["file_off"] + desc)
             idx = len(self.subs) + 1
-            self.names_tbl[r + 1] = idx
+            self.by_desc[desc] = idx
             is_local = bool(vals[VBMD_IS_LOCAL] & 1)
             lib = alias = ""
             if not is_local:
                 lib = self.globals.pool_name(vals[VBMD_LIB])
                 alias = self.globals.pool_name(vals[VBMD_ALIAS])
-            self.subs[idx] = SubInfo(idx, vals, lib, alias)
+            self.subs[idx] = SubInfo(idx, desc, vals, lib, alias)
             link = vals[VBMD_NEXT]
 
         # SELECTOR (type 2), internal-reference relocation chains assign code segments.
@@ -722,7 +737,7 @@ class SubTable:
             chain = src_off
             hops = 0
             while chain != 0xFFFF and hops < 0x2000:
-                idx = self.names_tbl.get((chain // 8) - 4 + 1)
+                idx = self.by_desc.get(chain - DESC_RELOC_LINK)
                 if idx is not None:
                     self.subs[idx].seg = tgt_seg
                 chain_pos = start["file_off"] + chain
@@ -732,9 +747,15 @@ class SubTable:
                 hops += 1
 
     def code_start(self, sub):
-        if not sub.is_local or sub.offs <= 0 or sub.seg not in self.seg_base:
+        if not sub.is_local or sub.offs < 0 or sub.seg not in self.seg_base:
             return None
         return self.seg_base[sub.seg] + sub.offs
+
+    def code_end(self, sub):
+        cs = self.code_start(sub)
+        if cs is None or sub.code_size <= sub.offs:
+            return None
+        return self.seg_base[sub.seg] + sub.code_size
 
     def sub_at(self, code_start):
         if self._by_code_start is None:
@@ -746,8 +767,8 @@ class SubTable:
         return self._by_code_start.get(code_start)
 
     def resolve(self, target):
-        """Call target token -> SubInfo or None."""
-        idx = self.names_tbl.get(_ror3(target) + 1)
+        """Sub chain token -> SubInfo or None."""
+        idx = self.by_desc.get(_desc_offset(target))
         return self.subs.get(idx) if idx is not None else None
 
     def resolve_call(self, disasm, rec, module=None):
@@ -756,7 +777,7 @@ class SubTable:
         `Call` tokens carry an internal target directly in params[2:4]. Other
         references follow MODULE11 under access class gc1172, with VarIndex =
         the token's last param word / 2:
-          gc1156: chain token = VarIndex * 2 (bit 0 cleared)
+          gc1156: chain token = the param word
           gc1152: chain token = gLocalVarsTypeArrExE[VarIndex] of `module`
         """
         params = rec.get("params") or b""
@@ -771,7 +792,7 @@ class SubTable:
             return None
         raw = struct.unpack_from("<H", params, len(params) - 2)[0]
         if l01B4 == GC1156:
-            return self.resolve(raw & 0xFFFE)
+            return self.resolve(raw)
         if l01B4 == GC1152 and module is not None:
             token = self.globals.module_word(module, raw & 0xFFFE)
             return self.resolve(token) if token else None
@@ -798,18 +819,8 @@ class SubTable:
         return f"{kind} sub#{sub.idx}{where}()"
 
     def proc_sub(self, recs):
-        """SubInfo whose code_start falls on this procedure's START token.
-
-        VBModuleDef.Offs points just past the START opcode, so the code_start
-        can lie anywhere from the START token up to the next token.
-        """
-        first = recs[0]["off"]
-        last = recs[1]["off"] if len(recs) > 1 else first + 2
-        for cs in range(first, last + 1, 2):
-            sub = self.sub_at(cs)
-            if sub is not None:
-                return sub
-        return None
+        """SubInfo whose code starts at this procedure's first token."""
+        return self.sub_at(recs[0]["off"])
 
 
 def build_call_graph(subs, disasm, procs):
@@ -872,7 +883,7 @@ def expr_infix(recs):
         if r.get("cval") is not None:
             expr = str(r["cval"])
         elif r.get("str") is not None:
-            expr = '"' + r["str"].decode("latin1", errors="replace") + '"'
+            expr = '"' + _ansi_text(r["str"]) + '"'
         elif r.get("ann"):
             expr = r["ann"]
         elif kw in BINOPS and len(stack) >= 2:
@@ -904,7 +915,7 @@ def _fmt_token(rec, subs=None):
     if rec["cval"] is not None:
         extra = f" ={rec['cval']}"
     elif rec["str"] is not None:
-        extra = f" {rec['str'].decode('latin1', errors='replace')!r}"
+        extra = f" {_ansi_text(rec['str'])!r}"
     elif rec.get("callee") is not None and subs is not None:
         extra = f" ->{subs.target_text(rec['callee'])}"
     elif rec.get("kw") in CALL_KEYWORDS:
@@ -963,30 +974,48 @@ def annotate(program, base_addr, all_procs, subs, callers):
 def decode_all(disasm, regions, subs=None):
     """Decode every region; returns [(label, procs)] with structure/expr applied.
 
-    Each procedure owned by a known Sub is re-walked with its module's type
-    state (gLocalVarsTypeArrExE), shared across that module's procedures.
+    Local Subs are decoded over their descriptor bounds with their module's
+    type state (gLocalVarsTypeArrExE), shared across that module's
+    procedures. Bytes outside any descriptor are scanned for START..FINISH
+    runs, which is the only discovery available for raw p-code dumps.
     """
     type_states = {}
 
-    def module_type_state(recs):
-        owner = subs.proc_sub(recs) if subs is not None else None
-        if owner is None:
-            return None
-        if owner.module not in type_states:
-            arr, count = subs.globals.module_locals(owner.module)
-            type_states[owner.module] = TypeState(count, arr) if count > 0 else None
-        return type_states[owner.module]
+    def module_type_state(sub):
+        if sub.module not in type_states:
+            arr, count = subs.globals.module_locals(sub.module)
+            type_states[sub.module] = TypeState(count, arr) if count > 0 else None
+        return type_states[sub.module]
 
     all_procs = []
     for label, rstart, rend in regions:
+        spans = []
+        if subs is not None:
+            for sub in subs.subs.values():
+                cs, ce = subs.code_start(sub), subs.code_end(sub)
+                if cs is not None and ce is not None and rstart <= cs < ce <= rend:
+                    spans.append((cs, ce, sub))
+        spans.sort(key=lambda span: span[0])
+
         procs = []
-        for recs in disasm.find_procedures(rstart, rend):
-            type_state = module_type_state(recs)
-            if type_state is not None:
-                recs = list(disasm.walk(recs[0]["off"], rend, type_state=type_state))
+        gap = rstart
+        for cs, ce, sub in spans:
+            if cs < gap:
+                continue   # overlapping descriptor; keep the first
+            procs.extend(disasm.find_procedures(gap, cs))
+            recs = [r for r in disasm.walk(cs, ce, max_tokens=(ce - cs) // 2,
+                                           type_state=module_type_state(sub),
+                                           stop_at_finish=False)
+                    if "bad" not in r]
+            if recs:
+                procs.append(recs)
+            gap = ce
+        procs.extend(disasm.find_procedures(gap, rend))
+
+        procs.sort(key=lambda recs: recs[0]["off"])
+        for recs in procs:
             structure(recs)
             expr_infix(recs)
-            procs.append(recs)
         if procs:
             all_procs.append((label, procs))
     return all_procs
@@ -1131,6 +1160,7 @@ def _sub_json(subs, sub):
         "module": sub.module,
         "segment": sub.seg if sub.is_local else None,
         "code_start": subs.code_start(sub),
+        "code_end": subs.code_end(sub),
         "lib": sub.lib.rstrip(".") if not sub.is_local else None,
         "alias": sub.alias if not sub.is_local else None,
         "declaration": subs.declaration(sub),

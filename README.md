@@ -6,10 +6,11 @@ Ghidra script for disassembling Visual Basic 3 p-code.
 
 Parses a VB3 EXE's NE segment table, identifies all p-code segments, and
 annotates the Ghidra listing with:
-- A label and plate comment at each procedure start. Procedures matched to the
-  EXE's Sub table are labeled `vb3_sub<N>`, and the plate shows the
-  `Sub`/`Function` header and the procedures that call it. Others are labeled
-  `seg08_proc_0000` etc.
+- A label and plate comment at each procedure start. Procedures come from the
+  EXE's Sub table descriptors (code segment, start and size), are labeled
+  `vb3_sub<N>`, and the plate shows the `Sub`/`Function` header and the
+  procedures that call it. Bytes no descriptor covers (or a raw p-code dump)
+  are scanned for START..FINISH runs, labeled `seg08_proc_0000` etc.
 - An EOL comment on every token: opcode keyword, parameter count, raw param
   bytes, a VBDIS3-style variable annotation (`gv1780%`), block indentation, and
   a best-effort infix expression on operators.
@@ -58,15 +59,16 @@ python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --proc 0x13966   # 
 - `target`, `tables`: path, size and SHA-256 of the EXE and the token tables used.
 - `segments`: NE segments with file offset, size, flags, decoded procedure count and bytes.
 - `subs`: the Sub table (`index`, `kind`, `local`, `module`, `segment`, `code_start`,
-  `lib`, `alias`, `declaration`). With `--proc`, only Subs the procedure owns or calls.
+  `code_end`, `lib`, `alias`, `declaration`). With `--proc`, only Subs the procedure owns or calls.
 - `procedures`: `start`/`end` file offsets, owning `sub`, `calls` (token offset and
   callee Sub index, `null` when unresolved), `callers`, and unless `--summary`, `tokens`
   (`offset`, `size`, `token`, `keyword`, `params` hex, `level`, and when known `int`,
   `string`, `var`, `callee`, `expr`).
 - `coverage`: totals versus returned counts and the number of unresolved calls.
 
-All offsets are 0-based file offsets. Strings are decoded as latin1, so every byte
-is preserved. Input that is not an NE executable produces
+All offsets are 0-based file offsets. JSON strings are decoded as latin1, so every
+byte is preserved; Ghidra comments and the text output show them as Windows-1252,
+the encoding VB3 used. Input that is not an NE executable produces
 `{"schema": ..., "error": {"code": "not-ne", "message": ...}}` with exit status 2.
 
 ### Tests
