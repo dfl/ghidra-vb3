@@ -24,6 +24,22 @@ def run(*args):
     return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
 
 
+class GhidraDetectionTest(unittest.TestCase):
+    def test_ghidra_script_names_resolve_by_lookup(self):
+        # PyGhidra's script globals answer `in` with False but resolve the name.
+        class PyGhidraLike(dict):
+            def __contains__(self, key):
+                return False
+
+            def __missing__(self, key):
+                if key == "currentProgram":
+                    return object()
+                raise KeyError(key)
+
+        self.assertTrue(vb3.in_ghidra(PyGhidraLike()))
+        self.assertFalse(vb3.in_ghidra({}))
+
+
 class InlineStringTest(unittest.TestCase):
     def test_strips_link_and_length_header(self):
         self.assertEqual(vb3._inline_string(b"\x9aU\x0b\x00\\events.mdb\x00"), b"\\events.mdb")

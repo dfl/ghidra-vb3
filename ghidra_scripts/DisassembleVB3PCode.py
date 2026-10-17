@@ -2435,7 +2435,17 @@ def cli(argv):
         print()
 
 
-if "currentProgram" in globals():
+def in_ghidra(namespace):
+    """True when run as a Ghidra script. PyGhidra's script globals resolve the
+    GhidraScript names on lookup but report False for `in`."""
+    try:
+        namespace["currentProgram"]
+    except KeyError:
+        return False
+    return True
+
+
+if in_ghidra(globals()):
     main()
 elif __name__ == "__main__":
     cli(sys.argv[1:])
