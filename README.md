@@ -111,8 +111,37 @@ unresolved indirect jumps are missed (each token counts them). Checked against
 `tests/vb3/stmts` (114 statements compiled with VB3, using VBRUN300 3.0.5.38),
 30 of 32 statements with a known Win16/DOS behaviour reach it. Not reached
 yet: `Open` (its open/create routine is reached through a jump via a variable)
-and `Load` (window creation only beyond the default depth). The tool needs
-`pip install capstone`; it is not needed for anything else.
+and `Load` (window creation only beyond the default depth). Following the
+variable, and walking deeper, reaches both only through the runtime's shared
+error paths, which most statements also reach, so neither is reported. The tool
+needs `pip install capstone`; it is not needed for anything else.
+
+### Library signatures
+
+Many VB3 programs ship the same library code, such as the setup kit's `SETUP1`.
+`tools/vb3_signatures.py` builds signatures from a compiled library and its
+source, and `--signatures FILE` (or `vb3-signatures.json` next to the EXE, for
+the Ghidra script) names the procedures that match:
+
+```bash
+python3 tools/vb3_signatures.py SETUP1.EXE SETUP1.BAS SETUP1.FRM PATH.FRM -o setup1.json
+python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --signatures setup1.json
+```
+
+A signature keeps only derived features: hashes of the procedure's token
+sequence without operands, of its token 4-grams and of its strings, and the DLL
+functions it calls. A match is exact (identical signature, so unmodified library
+code) or similar (4-gram similarity of at least 0.5, ahead of the next library
+procedure by 0.1, so modified library code). Short procedures without strings
+or DLL calls only match in a module where a distinctive procedure matched too.
+Exact matches name the procedure in Ghidra; both kinds appear in plates and the
+JSON.
+
+`signatures/vb3-setup-kit.json` is the VB 3.0 Professional setup kit's `SETUP1`
+(28 procedures). On the `SETUP1` that Polaris ships, it names 27 of 29
+procedures, 21 exact and 6 similar (modified copies); the 2 unnamed are
+Polaris's own. On Polaris's main program and the ground-truth programs it
+names nothing.
 
 ## Requirements
 
@@ -181,6 +210,9 @@ python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --proc 0x13966   # 
   none was found) and the program's `background` calls. Procedures then carry
   `runtime_calls` (nearest first, without background; `null` without a map) and tokens
   `runtime_calls` (all non-shared calls, nearest first).
+- `signatures` (with `--signatures`): the file's path, library name and the number of
+  procedures `matched`. Procedures then carry `signature` (`name`, `source` file,
+  `match` `exact` or `similar`, `score`, `library`; `null` when none matched).
 - `coverage`: totals versus returned counts, the number of unresolved calls, and variables
   by type source.
 

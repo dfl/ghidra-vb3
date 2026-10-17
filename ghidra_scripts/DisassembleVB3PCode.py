@@ -2165,7 +2165,13 @@ def _fmt_token(rec, subs=None):
     return f"{indent}{rec['kw']:<10} np={rec['np']:>2} {p}{extra}{ann}{tail}".rstrip()
 
 
-def _plate(seg_label, i, recs, subs, callers, variables=None, background=()):
+def _signature_text(match):
+    kind = "exact" if match["match"] == "exact" else f"similar, {match['score']:.2f}"
+    library = f", {match['library']}" if match.get("library") else ""
+    return f"Signature: {match['name']} ({kind}{library})"
+
+
+def _plate(seg_label, i, recs, subs, callers, variables=None, background=(), matches=None):
     sub = subs.proc_sub(recs) if subs else None
     lines = []
     if sub is not None:
@@ -2174,6 +2180,9 @@ def _plate(seg_label, i, recs, subs, callers, variables=None, background=()):
         if form:
             lines.append(f"Form {form}")
     lines.append(f"VB3 {seg_label} procedure #{i}  ({len(recs)} tokens)")
+    match = (matches or {}).get(recs[0]["off"])
+    if match:
+        lines.append(_signature_text(match))
     if sub is not None and callers.get(sub.idx):
         lines.append("Called from: " + ", ".join(f"{c:#x}" for c in sorted(callers[sub.idx])))
     if variables is not None:
@@ -2184,7 +2193,7 @@ def _plate(seg_label, i, recs, subs, callers, variables=None, background=()):
     return sub, "\n".join(lines)
 
 
-def annotate(program, base_addr, all_procs, subs, callers, variables=None, background=()):
+def annotate(program, base_addr, all_procs, subs, callers, variables=None, background=(), matches=None):
     from ghidra.program.model.symbol import RefType, SourceType
     listing = program.getListing()
     addr_space = program.getAddressFactory().getDefaultAddressSpace()
@@ -2194,8 +2203,11 @@ def annotate(program, base_addr, all_procs, subs, callers, variables=None, backg
     for seg_label, procs in all_procs:
         for i, recs in enumerate(procs):
             addr = addr_space.getAddress(base_addr + recs[0]["off"])
-            sub, plate = _plate(seg_label, i, recs, subs, callers, variables, background)
+            sub, plate = _plate(seg_label, i, recs, subs, callers, variables, background, matches)
             label = subs.label(sub) if sub is not None else f"{seg_label}_proc_{i:04d}"
+            match = (matches or {}).get(recs[0]["off"])
+            if match and match["match"] == "exact" and not (sub is not None and sub.event):
+                label = match["name"]
             cu = listing.getCodeUnitAt(addr)
             if cu:
                 cu.setComment(cu.PLATE_COMMENT, plate)
@@ -2306,7 +2318,15 @@ def main():
             println(f"Runtime map: {map_path}")
         except (OSError, ValueError) as e:
             println(f"Ignoring runtime map: {e}")
-    analysis, err = analyze(data, vbdis_dir, search_dirs, runtime_map, map_path)
+    sig_path = _find_file(search_dirs, SIGNATURES_FILE)
+    signatures = None
+    if sig_path:
+        try:
+            signatures = load_signatures(sig_path)
+            println(f"Signatures: {sig_path}")
+        except (OSError, ValueError) as e:
+            println(f"Ignoring signatures: {e}")
+    analysis, err = analyze(data, vbdis_dir, search_dirs, runtime_map, map_path, signatures, sig_path)
     if analysis is not None:
         subs, callers = analysis["subs"], analysis["callers"]
         variables = analysis["variables"]
@@ -2350,7 +2370,8 @@ def main():
 
     println(f"Annotating {total_procs} procedures ...")
     background = analysis["runtime_map"]["background"] if analysis and analysis["runtime_map"] else ()
-    n, refs = annotate(program, base_addr, all_procs, subs, callers, variables, background)
+    matches = analysis["signature_matches"] if analysis else None
+    n, refs = annotate(program, base_addr, all_procs, subs, callers, variables, background, matches)
     println(f"Done: annotated {n} procedures across {len(all_procs)} segment(s), {refs} call references.")
 
 
@@ -2381,6 +2402,97 @@ def load_runtime_map(path):
     if runtime_map.get("schema") != RUNTIME_MAP_SCHEMA:
         raise ValueError(f"runtime map {path}: expected schema {RUNTIME_MAP_SCHEMA}, got {runtime_map.get('schema')!r}")
     return runtime_map
+
+
+# ---------------------------------------------------------------------------
+# Library signatures (tools/vb3_signatures.py builds them from a compiled
+# library with known source): name procedures that ship in many programs, such
+# as the VB3 setup kit's SETUP1.
+# ---------------------------------------------------------------------------
+
+SIGNATURES_SCHEMA = "ghidra-vb3/signatures-v1"
+SIGNATURES_FILE = "vb3-signatures.json"
+SIGNATURE_NGRAM = 4        # tokens per n-gram for similarity
+SIMILAR_MIN = 0.5          # least n-gram Jaccard similarity reported as similar
+SIMILAR_MARGIN = 0.1       # lead over the next library procedure a similar match needs
+DISTINCT_TOKENS = 20       # procedures this long, or with strings or DLL calls, identify themselves
+
+
+def _hash32(data):
+    import hashlib
+    return int(hashlib.sha1(data).hexdigest()[:8], 16)
+
+
+def procedure_signature(recs):
+    """Build-independent features of a procedure: its token sequence without
+    operands (slot and frame operands differ between builds), hashes of its
+    string constants, and the DLL functions it calls. No code or text is kept."""
+    import hashlib
+    seq = struct.pack(f"<{len(recs)}H", *(r["tok"] for r in recs))
+    strings = sorted(_hash32(r["str"]) for r in recs if r["str"] is not None)
+    externs = sorted({(r["callee"].alias or r["callee"].name).lower() for r in recs
+                      if r.get("callee") is not None and not r["callee"].is_local})
+    n = SIGNATURE_NGRAM
+    return {
+        "tokens": len(recs),
+        "exact": hashlib.sha1(seq + json.dumps([strings, externs]).encode()).hexdigest(),
+        "ngrams": sorted({_hash32(seq[2 * i:2 * (i + n)]) for i in range(len(recs) - n + 1)}),
+        "strings": strings,
+        "externs": externs,
+    }
+
+
+def load_signatures(path):
+    """A tools/vb3_signatures.py file, or ValueError."""
+    with open(path) as f:
+        sigs = json.load(f)
+    if sigs.get("schema") != SIGNATURES_SCHEMA:
+        raise ValueError(f"signatures {path}: expected schema {SIGNATURES_SCHEMA}, got {sigs.get('schema')!r}")
+    return sigs
+
+
+def _distinct(sig):
+    return sig["tokens"] >= DISTINCT_TOKENS or bool(sig["strings"]) or bool(sig["externs"])
+
+
+def match_signatures(procs, signatures, module_of=None):
+    """{procedure start: match} for procedures matching a library procedure:
+    exact when the signature is identical (and unique in the library), else
+    similar when n-gram similarity is at least SIMILAR_MIN and leads the next
+    candidate by SIMILAR_MARGIN. Each library procedure names at most one
+    procedure, the best-scoring one. Short procedures without strings or DLL
+    calls (a 6-token Sub that calls one procedure) match unrelated code, so
+    they count only in a module where a distinctive procedure matched too.
+    module_of maps a procedure start to its code module."""
+    library = signatures["procedures"]
+    by_exact = {}
+    for entry in library:
+        by_exact.setdefault(entry["exact"], []).append(entry)
+    candidates, distinct = [], {}
+    for recs in procs:
+        sig = procedure_signature(recs)
+        distinct[recs[0]["off"]] = _distinct(sig)
+        exact = by_exact.get(sig["exact"], [])
+        if len(exact) == 1:
+            candidates.append((1.0, "exact", recs[0]["off"], exact[0]))
+            continue
+        grams = set(sig["ngrams"])
+        if not grams:
+            continue
+        scores = sorted(((len(grams & set(e["ngrams"])) / len(grams | set(e["ngrams"])), i)
+                         for i, e in enumerate(library) if e["ngrams"]), reverse=True)
+        if scores and scores[0][0] >= SIMILAR_MIN and (len(scores) == 1 or scores[0][0] - scores[1][0] >= SIMILAR_MARGIN):
+            candidates.append((scores[0][0], "similar", recs[0]["off"], library[scores[0][1]]))
+    matches, named = {}, set()
+    for score, kind, start, entry in sorted(candidates, key=lambda c: (-c[0], c[2])):
+        if start in matches or id(entry) in named:
+            continue
+        named.add(id(entry))
+        matches[start] = {"name": entry["name"], "source": entry.get("source"), "match": kind,
+                          "score": round(score, 3), "library": signatures.get("library")}
+    module_of = module_of or {}
+    anchored = {module_of.get(start) for start in matches if distinct[start]}
+    return {start: m for start, m in matches.items() if distinct[start] or module_of.get(start, start) in anchored}
 
 
 def apply_runtime_map(procs, runtime_map):
@@ -2435,12 +2547,14 @@ def proc_runtime_calls(recs, background=()):
     return sorted(depth, key=lambda n: (depth[n], n))
 
 
-def analyze(data, tables_dir, search_dirs=(), runtime_map=None, runtime_map_path=None):
+def analyze(data, tables_dir, search_dirs=(), runtime_map=None, runtime_map_path=None, signatures=None,
+            signatures_path=None):
     """Decode an NE EXE. Returns (analysis dict, None) or (None, error string).
 
     search_dirs are searched for VBRUN300.DLL and the project's .VBX files.
     runtime_map, from tools/vbrun_map.py, annotates tokens with the Win16 and
-    DOS calls their handlers reach.
+    DOS calls their handlers reach. signatures, from tools/vb3_signatures.py,
+    name library procedures.
     """
     segments, err = parse_ne_segments(data)
     if segments is None:
@@ -2461,11 +2575,18 @@ def analyze(data, tables_dir, search_dirs=(), runtime_map=None, runtime_map_path
     variables = VariableTable(subs, disasm, flat)
     simulate(subs, disasm, flat, variables)
     background = apply_runtime_map(flat, runtime_map) if runtime_map is not None else []
+    matches = {}
+    if signatures is not None:
+        module_of = {recs[0]["off"]: sub.module for recs in flat for sub in [subs.proc_sub(recs)] if sub is not None}
+        matches = match_signatures(flat, signatures, module_of)
     return {
         "segments": segments, "regions": regions, "subs": subs, "disasm": disasm,
         "procs": procs, "calls": calls, "callers": callers, "forms": forms, "models": models,
         "variables": variables,
         "runtime_map": runtime_map_info(runtime_map, runtime_map_path, models, background),
+        "signatures": ({"path": signatures_path, "library": signatures.get("library"), "matched": len(matches)}
+                       if signatures is not None else None),
+        "signature_matches": matches,
     }, None
 
 
@@ -2602,6 +2723,7 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
             "variables": sorted(v.id for v in by_proc.get(recs[0]["off"], ())),
             "runtime_calls": (proc_runtime_calls(recs, analysis["runtime_map"]["background"])
                               if analysis["runtime_map"] else None),
+            "signature": analysis["signature_matches"].get(recs[0]["off"]),
         }
         used_vars.update(proc["variables"])
         if tokens:
@@ -2636,6 +2758,7 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
             "warnings": analysis["models"].warnings,
         },
         "runtime_map": analysis["runtime_map"],
+        "signatures": analysis["signatures"],
         "forms": [_form_json(f) for f in analysis["forms"]],
         "subs": sub_list,
         "variables": [_variable_json(v) for v in sorted(analysis["variables"].vars.values(), key=lambda v: v.id)
@@ -2673,6 +2796,7 @@ def cli(argv):
     ap.add_argument("--vbx-dir", action="append", default=[],
                     help="directory to search for VBRUN300.DLL and .VBX files before the EXE's own")
     ap.add_argument("--runtime-map", help=f"{RUNTIME_MAP_SCHEMA} file from tools/vbrun_map.py")
+    ap.add_argument("--signatures", help=f"{SIGNATURES_SCHEMA} file from tools/vb3_signatures.py")
     ap.add_argument("--version", action="version", version=f"ghidra-vb3 {__version__}")
     args = ap.parse_args(argv)
 
@@ -2685,7 +2809,13 @@ def cli(argv):
             runtime_map = load_runtime_map(args.runtime_map)
         except (OSError, ValueError) as e:
             raise SystemExit(f"runtime map: {e}")
-    analysis, err = analyze(data, args.tables, search_dirs, runtime_map, args.runtime_map)
+    signatures = None
+    if args.signatures:
+        try:
+            signatures = load_signatures(args.signatures)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"signatures: {e}")
+    analysis, err = analyze(data, args.tables, search_dirs, runtime_map, args.runtime_map, signatures, args.signatures)
     if analysis is None:
         if args.json:
             json.dump({"schema": JSON_SCHEMA, "error": {"code": "not-ne", "message": err}}, sys.stdout)
@@ -2712,7 +2842,8 @@ def cli(argv):
         if args.proc is not None and not (recs[0]["off"] <= args.proc < recs[-1]["end"]):
             continue
         background = analysis["runtime_map"]["background"] if analysis["runtime_map"] else ()
-        _, plate = _plate(label, i, recs, subs, callers, analysis["variables"], background)
+        _, plate = _plate(label, i, recs, subs, callers, analysis["variables"], background,
+                          analysis["signature_matches"])
         print("\n".join(f"; {line}" for line in plate.splitlines()))
         for rec in recs:
             print(f"{rec['off']:#08x}: {_fmt_token(rec, subs)}")

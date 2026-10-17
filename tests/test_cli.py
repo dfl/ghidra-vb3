@@ -174,6 +174,40 @@ class BindArgumentsTest(unittest.TestCase):
         self.assertEqual((vb3.CONST_TYPES["True"], vb3.CONST_TYPES["False"]), ("Integer", "Integer"))
 
 
+class SignatureTest(unittest.TestCase):
+    def recs(self, toks, strings=(), start=0x100):
+        out = [{"tok": t, "str": None, "params": bytes([i]), "off": start + 2 * i} for i, t in enumerate(toks)]
+        out += [{"tok": 0x389A, "str": s, "params": b"", "off": start + 0x80 + i} for i, s in enumerate(strings)]
+        return out
+
+    def library(self, *named_recs):
+        return {"schema": vb3.SIGNATURES_SCHEMA, "library": "test",
+                "procedures": [dict(name=n, **vb3.procedure_signature(r)) for n, r in named_recs]}
+
+    def test_operands_do_not_change_the_signature_but_strings_do(self):
+        a = self.recs(range(30))
+        b = [dict(r, params=b"\xff\xff") for r in a]
+        self.assertEqual(vb3.procedure_signature(a)["exact"], vb3.procedure_signature(b)["exact"])
+        self.assertNotEqual(vb3.procedure_signature(a)["exact"],
+                            vb3.procedure_signature(self.recs(range(30), [b"x"]))["exact"])
+
+    def test_exact_and_similar_matches(self):
+        lib = self.library(("Long", self.recs(range(40))), ("Other", self.recs(range(100, 140))))
+        edited = self.recs(list(range(36)) + [999, 998, 997, 996], start=0x200)
+        got = vb3.match_signatures([edited], lib)
+        self.assertEqual((got[0x200]["name"], got[0x200]["match"]), ("Long", "similar"))
+        # A library procedure names one procedure: the exact copy wins over the edited one.
+        got = vb3.match_signatures([self.recs(range(40)), edited], lib)
+        self.assertEqual({k: (m["name"], m["match"]) for k, m in got.items()}, {0x100: ("Long", "exact")})
+
+    def test_short_plain_procedures_need_a_distinctive_match_in_their_module(self):
+        short, long_ = self.recs([1, 2, 3]), self.recs(range(40), start=0x400)
+        lib = self.library(("Short", short), ("Long", long_))
+        self.assertEqual(vb3.match_signatures([short], lib, {0x100: 1}), {})
+        got = vb3.match_signatures([short, long_], lib, {0x100: 1, 0x400: 1})
+        self.assertEqual({m["name"] for m in got.values()}, {"Short", "Long"})
+
+
 class FormRecordTest(unittest.TestCase):
     @staticmethod
     def record(ctrl_id, type_id, body=b"\xff\xff\x00"):
@@ -395,6 +429,16 @@ class GroundTruthByRefTest(unittest.TestCase):
         expected = os.path.join(ROOT, "tests", "vb3", "byref", "expected.json")
         wrong = [r for r in score_types.score(BYREF_EXE, expected) if r[1] != "ok"]
         self.assertEqual(wrong, [])
+
+
+class ShippedSignaturesTest(unittest.TestCase):
+    def test_setup_kit_signatures_name_nothing_in_unrelated_programs(self):
+        path = os.path.join(ROOT, "signatures", "vb3-setup-kit.json")
+        for exe in (TYPES_EXE, BYREF_EXE, USAGE_EXE, os.path.join(ROOT, "tests", "vb3", "stmts", "STMTS.EXE")):
+            if exe and os.path.exists(exe):
+                with self.subTest(exe=os.path.basename(exe)):
+                    out = json.loads(run(exe, "--json", "--summary", "--signatures", path).stdout)
+                    self.assertEqual([p["signature"] for p in out["procedures"] if p["signature"]], [])
 
 
 @unittest.skipUnless(USAGE_EXE, "tests/vb3/usage/USAGE.EXE not built (see tests/vb3/README.md)")
