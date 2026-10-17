@@ -8,7 +8,7 @@ Parses a VB3 EXE's NE segment table, identifies all p-code segments, and
 annotates the Ghidra listing with:
 - A label and plate comment at each procedure start. Procedures come from the
   EXE's Sub table descriptors (code segment, start and size). Event procedures
-  are named from the form and control event tables (`Form10.Command1_Click`,
+  are named from the form, control and menu event tables (`Form10.Command1_Click`,
   with VB3's parameter list); other procedures get vb3dec's names
   (`sub0D5C`, `fn13EB`), qualified by their form in form modules. The plate
   shows the `Sub`/`Function` header, the form, the procedures that call it, and

@@ -1,6 +1,7 @@
 """CLI tests. Set VB3_SAMPLE to a VB3 NE EXE to run the sample-based tests."""
 import importlib.util
 import json
+import struct
 import os
 import subprocess
 import sys
@@ -129,6 +130,58 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual({t: vb3.COERCION_SOURCES[t] for t in (0x0EB0, 0x0F1C, 0x10F1, 0x1102, 0x1156, 0x11C3)},
                          {0x0EB0: "Integer", 0x0F1C: "Long", 0x10F1: "Single", 0x1102: "Double",
                           0x1156: "Currency", 0x11C3: "String"})
+
+
+class FormRecordTest(unittest.TestCase):
+    @staticmethod
+    def record(ctrl_id, type_id, body=b"\xff\xff\x00"):
+        rec = bytes([ctrl_id, 0, type_id]) + body          # id, empty name, type, properties
+        return struct.pack("<I", 4 + len(rec)) + rec
+
+    def test_menu_records_follow_tags_2_and_5(self):
+        # After the controls, tag 2 closes a level with no record, tag 5 opens
+        # the menu section with a record, and each further menu item is a
+        # record tagged 2 (as VB3 writes VBDIS3's File menu).
+        form = self.record(0, 0x0D)
+        stream = (b"\xff\xcc\x2c" + b"\0" * 6 + form
+                  + b"\x03" + self.record(1, 0x04)         # CommandButton
+                  + b"\x02"                                 # close level
+                  + b"\x05" + self.record(2, 0x13)         # first menu
+                  + b"\x02" + self.record(3, 0x13)         # next menu item
+                  + b"\x03\x03\x04" + b"\0" * 16)          # close menu levels, end, padding
+        warnings = []
+        starts = list(vb3.form_records(stream, 9 + len(form), warnings))
+        self.assertEqual([stream[p + 4] for p in starts], [1, 2, 3])
+        self.assertEqual(warnings, [])
+
+    def test_sibling_records_of_unknown_control_types_are_kept(self):
+        form = self.record(0, 0x0D)
+        stream = (b"\xff\xcc\x2c" + b"\0" * 6 + form
+                  + b"\x03" + self.record(1, 0x16)         # a type id not in the built-in table
+                  + b"\x03" + self.record(2, 0x04) + b"\x04")
+        warnings = []
+        starts = list(vb3.form_records(stream, 9 + len(form), warnings))
+        self.assertEqual([stream[p + 4] for p in starts], [1, 2])
+        self.assertEqual(warnings, [])
+
+    def test_structural_tag_before_a_tagged_record_is_not_read_as_a_record(self):
+        # 02 03 <record>: tag 2 closes a level and 3 introduces the record. In
+        # a large stream "03 <record>" can also parse as a record header (its
+        # length is 03 + 256 * the real length); SETUPWIZ.EXE's form does.
+        form = self.record(0, 0x0D)
+        body = b"\x00\x00\x00\x04" + b"\x00" * 0x20 + b"\xff\xff\x00"   # body[3] looks like a type id
+        inner = self.record(5, 0x04, body)
+        stream = (b"\xff\xcc\x2c" + b"\0" * 6 + form
+                  + b"\x02\x03" + inner + b"\x04" + b"\0" * (len(inner) * 256 + 16))
+        starts = list(vb3.form_records(stream, 9 + len(form), []))
+        self.assertEqual([stream[p + 4] for p in starts], [5])
+
+    def test_reports_a_record_tag_followed_by_garbage(self):
+        form = self.record(0, 0x0D)
+        stream = b"\xff\xcc\x2c" + b"\0" * 6 + form + b"\x03\x99\x99\x99\x99"
+        warnings = []
+        self.assertEqual(list(vb3.form_records(stream, 9 + len(form), warnings)), [])
+        self.assertEqual(len(warnings), 1)
 
 
 class NonNeTest(unittest.TestCase):

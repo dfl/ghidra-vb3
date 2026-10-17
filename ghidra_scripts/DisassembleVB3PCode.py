@@ -769,6 +769,56 @@ def _decode_events(blob, model, is_form=False, is_combo=False):
     return events
 
 
+def _is_record(stream, pos, known_type=True):
+    """True when a control record (length, id, name, type) starts at pos;
+    with known_type, its type must also be a built-in or custom control."""
+    if pos + 7 > len(stream):
+        return False
+    raw_len = struct.unpack_from("<I", stream, pos)[0]
+    length = raw_len & 0x7FFFFFFF
+    if length < 7 or pos + length > len(stream):
+        return False
+    at = pos + 5 + (2 if raw_len & 0x80000000 else 0)
+    type_at = at + 1 + stream[at]
+    if type_at >= pos + length:
+        return False
+    return not known_type or stream[type_at] in BUILTIN_CONTROL_TYPES or stream[type_at] == 0xFF
+
+
+def form_records(stream, pos, warnings=None):
+    """Offsets of the control and menu records after the form record.
+
+    Each record is preceded by a tag. Tags 1 (first child), 2, 3 (next
+    sibling) and 5 (menu section) carry a record when one follows and are
+    structural otherwise: among controls 2 closes a level, menu items are
+    tagged 2, and 3 closes menu levels. 4 ends the form.
+    """
+    while pos < len(stream):
+        tag = stream[pos]
+        pos += 1
+        if tag == 4:
+            return
+        if tag not in (1, 2, 3, 5):
+            if warnings is not None:
+                warnings.append(f"unknown form record tag {tag:#04x} at {pos - 1:#x}")
+            return
+        # The tag is structural when the next byte is a tag that introduces a
+        # record (or ends the form). Otherwise it carries a record: tags 1 and
+        # 3 among controls always do, possibly of a control type this table
+        # lacks; other tags need a recognisable type.
+        nxt = stream[pos] if pos < len(stream) else None
+        if nxt == 4 or (nxt in (1, 2, 3, 5) and (_is_record(stream, pos + 1, known_type=False)
+                                                 or (pos + 1 < len(stream) and stream[pos + 1] in (1, 2, 3, 4, 5)))):
+            continue
+        if _is_record(stream, pos, known_type=tag not in (1, 3)):
+            yield pos
+            pos += struct.unpack_from("<I", stream, pos)[0] & 0x7FFFFFFF
+        else:
+            if warnings is not None:
+                warnings.append(f"form record tag {tag} at {pos - 1:#x} is followed by no record")
+            return
+
+
 def decode_form(data, ref, models):
     """Form with its controls and event bindings, or None when the stream is unreadable."""
     stream = _rcdata(data, ref.res_id)
@@ -789,20 +839,9 @@ def decode_form(data, ref, models):
     form = Form(ref, Control(0, ref.name, "Form"))
     form.root.events = _decode_events(stream[p:form_end], models.builtin_model("Form"), is_form=True)
 
-    pos = form_end
-    while pos < len(stream):
-        tag = stream[pos]
-        pos += 1
-        if tag in (2, 5):          # end of container / sub-container start
-            continue
-        if tag not in (1, 3) or pos + 5 > len(stream):
-            break                   # 4 = end of form
+    for pos in form_records(stream, form_end, form.warnings):
         raw_len = struct.unpack_from("<I", stream, pos)[0]
-        rec_len = raw_len & 0x7FFFFFFF
-        end = pos + rec_len
-        if rec_len < 5 or end > len(stream):
-            form.warnings.append(f"control record at {pos:#x} has invalid length")
-            break
+        end = pos + (raw_len & 0x7FFFFFFF)
         ctrl_id = stream[pos + 4]
         cp = pos + 5
         is_array = bool(raw_len & 0x80000000)
@@ -835,7 +874,6 @@ def decode_form(data, ref, models):
         if model is None and control.events:
             form.warnings.append(f"{name} ({type_name}): no control model; event names unavailable")
         form.controls.append(control)
-        pos = end
     return form
 
 
