@@ -1,0 +1,170 @@
+{
+  "cases": {
+    "byval_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "chain_currency": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "chain_double": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "chain_int": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "chain_long": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "chain_single": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "chain_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "chain_variant": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "chdrive_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "kill_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "pass_currency": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "pass_double": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "pass_int": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "pass_long": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "pass_single": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "pass_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "pass_variant": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "recv_currency": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "recv_double": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "recv_int": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "recv_long": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "recv_single": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "recv_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "recv_variant": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "skip_byval_currency": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "skip_byval_double": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "skip_byval_int": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "skip_byval_long": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "skip_byval_single": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "skip_byval_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "skip_byval_variant": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "skip_currency": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "skip_double": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "skip_int": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "skip_long": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "skip_single": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "skip_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "skip_variant": {
+      "storage": "param",
+      "type": "Variant"
+    }
+  },
+  "program": "BYREF.MAK",
+  "temporaries": {
+    "temp_currency": "Currency",
+    "temp_currency_from_int": "Currency",
+    "temp_double": "Double",
+    "temp_double_from_int": "Double",
+    "temp_int": "Integer",
+    "temp_long": "Long",
+    "temp_long_from_int": "Long",
+    "temp_single": "Single",
+    "temp_single_from_int": "Single",
+    "temp_string": "String",
+    "temp_variant": "Variant"
+  }
+}

@@ -15,6 +15,9 @@ TYPES_EXE = os.environ.get("VB3_TYPES_EXE", os.path.join(ROOT, "tests", "vb3", "
 if not os.path.exists(TYPES_EXE):
     TYPES_EXE = None
 VBX_DIR = os.environ.get("VB3_VBX_DIR")
+BYREF_EXE = os.path.join(ROOT, "tests", "vb3", "byref", "BYREF.EXE")
+if not os.path.exists(BYREF_EXE):
+    BYREF_EXE = None
 
 spec = importlib.util.spec_from_file_location("vb3", SCRIPT)
 vb3 = importlib.util.module_from_spec(spec)
@@ -369,6 +372,21 @@ class GroundTruthTypesTest(unittest.TestCase):
         self.assertTrue(bounded)
         for v in bounded:
             self.assertEqual(v["max_bytes"], sizes[v["type"]], v["name"])
+
+
+@unittest.skipUnless(BYREF_EXE, "tests/vb3/byref/BYREF.EXE not built (see tests/vb3/README.md)")
+class GroundTruthByRefTest(unittest.TestCase):
+    def test_temporaries_name_their_parameter_type(self):
+        script = os.path.join(ROOT, "tests", "vb3", "byref", "extract.py")
+        result = subprocess.run([sys.executable, script, BYREF_EXE], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_passed_parameters_get_their_types(self):
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        import score_types
+        expected = os.path.join(ROOT, "tests", "vb3", "byref", "expected.json")
+        wrong = [r for r in score_types.score(BYREF_EXE, expected) if r[1] != "ok"]
+        self.assertEqual(wrong, [])
 
 
 if __name__ == "__main__":

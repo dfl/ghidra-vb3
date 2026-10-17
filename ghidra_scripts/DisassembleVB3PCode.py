@@ -1530,8 +1530,9 @@ TOK_BYVAL_STRING = 0x1972       # converts the string on the stack to a ByVal C 
 TOK_BYVAL = (0x6A63, 0x6A02)
 # Store the value on the stack in a frame temporary of the parameter's type and
 # pass the temporary by reference (constants and expressions passed to ByRef
-# parameters). Types from the values and conversions that precede them.
-TEMP_REFERENCE_TYPES = {0x6AD5: "Integer", 0x6AC5: "Long", 0x6AB5: "Double", 0x6AAB: "", 0x6A63: "String"}
+# parameters). Observed in tests/vb3/byref/BYREF.EXE.
+TEMP_REFERENCE_TYPES = {0x6AD5: "Integer", 0x6AC5: "Long", 0x6AAB: "Single", 0x6AB5: "Double",
+                        0x6A95: "Currency", 0x6A63: "String", 0x699D: "Variant"}
 ARG_BYTES = {"Integer": 2, "Long": 4, "Single": 4, "Double": 8, "Currency": 8}
 ALT_UNARY_MINUS = 0x00F9
 CTL_KIND_ADDRESS = 8
