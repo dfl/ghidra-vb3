@@ -56,6 +56,19 @@ covering every type as a local, ByRef/ByVal parameter, `Static`, module-level
 and global variable, `ReDim` and `Static` arrays, a `Form` object, event
 parameters and usage-only cases. All 57 storage classes and types are
 recovered (53 recorded, 4 inferred); `tests/score_types.py` reports it.
+`tests/vb3/byref/` covers argument passing: the temporaries VB3 creates for
+constants passed ByRef (one token per type), and 38 parameters that only
+argument passing types, all recovered.
+
+Frame locals also get an upper bound on their size (`max_bytes`, the bytes up
+to the next variable), which identifies user-defined types: a local `As
+OFStruct` reads "at most 136 bytes", its exact size.
+
+On a real program with published source, the VB3 setup kit's `SETUP1` as
+shipped with Polaris, forms, controls, events and `Declare`s match exactly, and
+all parameter and `Dim` types match. When comparing with source, note that
+`DefInt` and the other `Def` statements apply only to the module that
+contains them, so undeclared variables elsewhere are Variant.
 
 Scope is intentionally limited to **opcode + params per token**, with call
 resolution and light structuring on top. It does not reconstruct VB source.
