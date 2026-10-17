@@ -1499,7 +1499,7 @@ def infer_declare_params(calls, arg_bytes):
     """Declare parameters from every call's arguments. VB3 keeps no Declare
     parameter lists; each call converts and pushes arguments as the declaration
     requires. A parameter is ByVal unless some call passes an address, and its
-    type is the one all calls agree on."""
+    type is the one all calls agree on (As Any for addresses of unknown type)."""
     n = max((len(c) for c in calls), default=0)
     params = []
     for i in range(n):
@@ -1519,7 +1519,8 @@ def infer_declare_params(calls, arg_bytes):
         typ = next(iter(types)) if len(types) == 1 else ""
         name = f"p{i + 1}"
         if by_ref:
-            params.append(f"{name} As Any")
+            # A String's address could be declared As String or As Any, which pass different things.
+            params.append(f"{name} As {typ if typ in TYPE_SUFFIX and typ != 'String' else 'Any'}")
         elif typ == "ByVal String":
             params.append(f"ByVal {name}$")
         elif typ in TYPE_SUFFIX and typ != "String":
@@ -1882,7 +1883,7 @@ def simulate(subs, disasm, procs, variables):
                 else:
                     item = _StackItem(var.type if var is not None else "", var=var)
                     if var is not None and var.array and disasm._ft2_lookup(tok)[1] == ARRAY_ELEMENT_ADDRESS:
-                        item.reference = item.element = True
+                        item.by_ref = item.reference = item.element = True
                     stack.append(item)
             elif kw == "C<typ>":
                 if stack:

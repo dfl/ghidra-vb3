@@ -88,6 +88,11 @@ class DeclareParamsTest(unittest.TestCase):
     def test_byval_string(self):
         self.assertEqual(vb3.infer_declare_params([[vb3.ExternArg(by_val_string=True)]], [-1]), ["ByVal p1$"])
 
+    def test_byref_argument_of_known_type_keeps_it(self):
+        # Array elements passed by reference: their element type is known.
+        calls = [[vb3.ExternArg(by_ref=True, typ="Double")], [vb3.ExternArg(by_ref=True, typ="Double")]]
+        self.assertEqual(vb3.infer_declare_params(calls, [4, 4]), ["p1 As Double"])
+
     def test_unknown_types_resolved_by_argument_bytes(self):
         # Two unknown arguments filling 4 bytes can only be Integers.
         calls = [[vb3.ExternArg(), vb3.ExternArg()]]
