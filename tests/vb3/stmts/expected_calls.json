@@ -1,0 +1,131 @@
+{
+  "about": "Win16/DOS functions each STMTS.EXE case should reach in VBRUN300.DLL 3.0.5.38; any one listed name counts. known_gaps are cases the static walk does not reach yet.",
+  "cases": {
+    "appactivate": [
+      "USER.FINDWINDOW",
+      "USER.SETACTIVEWINDOW"
+    ],
+    "beep": [
+      "USER.MESSAGEBEEP"
+    ],
+    "chdir": [
+      "DOS.chdir"
+    ],
+    "chdrive": [
+      "DOS.select-disk"
+    ],
+    "close": [
+      "DOS.close",
+      "KERNEL._LCLOSE"
+    ],
+    "curdir": [
+      "DOS.getcwd"
+    ],
+    "date_fn": [
+      "DOS.get-date"
+    ],
+    "date_stmt": [
+      "DOS.set-date"
+    ],
+    "dir": [
+      "DOS.findfirst",
+      "DOS.findnext"
+    ],
+    "doevents": [
+      "USER.PEEKMESSAGE",
+      "USER.GETMESSAGE"
+    ],
+    "environ": [
+      "KERNEL.GETDOSENVIRONMENT"
+    ],
+    "filelen": [
+      "DOS.findfirst",
+      "DOS.open",
+      "DOS.seek",
+      "KERNEL.OPENFILE",
+      "KERNEL._LLSEEK"
+    ],
+    "get": [
+      "DOS.read",
+      "KERNEL._LREAD"
+    ],
+    "inputbox": [
+      "USER.DIALOGBOX",
+      "USER.DIALOGBOXPARAM",
+      "USER.DIALOGBOXINDIRECT",
+      "USER.DIALOGBOXINDIRECTPARAM",
+      "USER.CREATEDIALOG"
+    ],
+    "kill": [
+      "DOS.delete"
+    ],
+    "load": [
+      "USER.CREATEWINDOW",
+      "USER.CREATEWINDOWEX"
+    ],
+    "mkdir": [
+      "DOS.mkdir"
+    ],
+    "msgbox_fn": [
+      "USER.MESSAGEBOX"
+    ],
+    "msgbox_stmt": [
+      "USER.MESSAGEBOX"
+    ],
+    "name": [
+      "DOS.rename"
+    ],
+    "now": [
+      "DOS.get-date",
+      "DOS.get-time"
+    ],
+    "open_output": [
+      "DOS.open",
+      "DOS.create",
+      "KERNEL.OPENFILE",
+      "KERNEL._LOPEN",
+      "KERNEL._LCREAT"
+    ],
+    "put": [
+      "DOS.write",
+      "KERNEL._LWRITE"
+    ],
+    "randomize": [
+      "DOS.get-time",
+      "USER.GETCURRENTTIME"
+    ],
+    "rmdir": [
+      "DOS.rmdir"
+    ],
+    "seek_stmt": [
+      "DOS.seek",
+      "KERNEL._LLSEEK"
+    ],
+    "sendkeys": [
+      "USER.POSTMESSAGE",
+      "USER.SENDMESSAGE",
+      "USER.SETKEYBOARDSTATE"
+    ],
+    "shell": [
+      "KERNEL.WINEXEC"
+    ],
+    "time_fn": [
+      "DOS.get-time"
+    ],
+    "time_stmt": [
+      "DOS.set-time"
+    ],
+    "timer": [
+      "DOS.get-time",
+      "USER.GETCURRENTTIME",
+      "USER.GETTICKCOUNT"
+    ],
+    "unload": [
+      "USER.DESTROYWINDOW"
+    ]
+  },
+  "known_gaps": {
+    "load": "window creation is reached only beyond the default depth",
+    "open_output": "the open/create routine is reached through a jump via a variable (ss:[0x27a])"
+  }
+}

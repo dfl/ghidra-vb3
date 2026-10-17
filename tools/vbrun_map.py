@@ -1,21 +1,37 @@
-"""Prototype: which Win16 functions can each VB3 p-code handler reach?
+"""Map VB3 p-code tokens to the Win16 and DOS functions their handlers reach.
+
+Usage:
+    python3 tools/vbrun_map.py VBRUN300.DLL PROGRAM [PROGRAM ...] [-o vbrun-map.json]
+        [--ghidra GHIDRA_INSTALL] [--max-depth 8]
+
+PROGRAM is a VB3 EXE or DisassembleVB3PCode.py --json output; the tokens it
+uses are mapped. Pass the map to DisassembleVB3PCode.py --runtime-map (or put
+vbrun-map.json next to the EXE for the Ghidra script).
 
 P-code tokens are near offsets of their handlers in VBRUN300.DLL's
 interpreter segment, whose handlers end by dispatching the next token with
-`es: lodsw ; jmp ax`. Given the tokens a program uses, this walks each
-handler's code with capstone:
+`es: lodsw ; jmp ax`. Each handler's code is walked with capstone:
 
-- jumps are followed; conditional jumps follow both edges;
+- jumps are followed, conditional jumps on both edges, and near jump tables
+  `jmp cs:[bx + disp]` when a `cmp bx, N` bound precedes them;
 - near and far calls are followed one call level deeper, through NE
   relocations for far calls and imports;
 - the walk continues after a call only when the callee returns. Interpreter
-  helpers often do not: some end in the next-token dispatch, and the bytes
-  after the call are then not code. A callee returns when some path ends in
-  ret/retf, or in `jmp reg` through a register it popped (helpers that pop
-  their own return address to read stack arguments).
+  helpers often do not: some end in the next-token dispatch. A callee returns
+  when some path ends in ret/retf, or in `jmp reg` through a register it popped;
+- handlers that call a helper with an inline runtime-function number are
+  followed through the helper's dispatch tables, parsed from the runtime's
+  own code;
+- `push <selector> ; push <offset>` far pointers passed to callees are
+  treated as possible callbacks;
+- DOS3Call (KERNEL.102) and INT 21h are named by the AH function, carried
+  into callees when a caller loads it.
 
-Indirect jumps and calls are not followed and are counted. Import ordinals are
-named from Ghidra's win16 .exports files when a Ghidra installation is given.
+Results are reachability, not calls every execution makes. Indirect jumps and
+calls the walk cannot resolve are counted per token. Import ordinals are named
+from Ghidra's win16 .exports files.
+
+Requires capstone.
 """
 import collections
 import glob
@@ -205,6 +221,24 @@ class Walker:
         self._dispatch = sorted(zip(lows, [t[0] for t in targets], [t[1] for t in targets]), reverse=True)
         return self._dispatch
 
+    def _jump_table(self, seg, op, bound):
+        """Targets of `jmp word ptr cs:[bx + disp]` when a `cmp bx, N` bound
+        check precedes it (BX is a doubled index, so N // 2 + 1 entries)."""
+        m = re.fullmatch(r"word ptr cs:\[bx \+ (0x[0-9a-f]+)\]", op)
+        if not m or bound is None or bound > 0x200:
+            return None
+        code, disp = self.img.code(seg), int(m.group(1), 16)
+        targets = []
+        for i in range(bound // 2 + 1):
+            at = disp + 2 * i
+            if at + 2 > len(code):
+                break
+            target = struct.unpack_from("<H", code, at)[0]
+            if target >= len(code):
+                return None    # not a table of offsets in this segment
+            targets.append(target)
+        return targets
+
     def runtime_function(self, seg, ret, reader):
         """(segment, offset, operand bytes) of the routine named inline at ret."""
         code = self.img.code(seg)
@@ -234,90 +268,46 @@ class Walker:
             tgt = (kind, a, struct.unpack_from("<H", code, pc + 1)[0]) if kind == "internal" else rel[pc + 3]
         return tgt
 
-    def edges(self, seg, start):
-        """Walk one routine's flow from start without entering calls. Yields
-        ('call', target, returns_after) for calls and ('end', kind) for path ends."""
-        seen, work = set(), [start]
-        while work:
-            pc = work.pop()
-            popped = set()
-            while (seg, pc) not in seen:
-                seen.add((seg, pc))
-                ins = self._decode(seg, pc)
-                if ins is None:
-                    yield ("end", "undecodable")
-                    break
-                m, op = ins.mnemonic, ins.op_str
-                nxt = pc + ins.size
-                if m == "pop" and op in ("bx", "cx", "dx", "si", "di", "bp"):
-                    popped.add(op)
-                if m in RETURNS:
-                    yield ("end", "return")
-                    break
-                if m in ("lcall", "ljmp") and ins.size == 5:
-                    tgt = self.far_target(seg, pc)
-                    if m == "ljmp":
-                        yield ("tail", tgt)
-                        break
-                    yield ("call", tgt, nxt)
-                    pc = nxt
-                    continue
-                if m in ("call", "jmp") or m.startswith("j") or m.startswith("loop"):
-                    try:
-                        target = int(op, 16) & 0xFFFF
-                    except ValueError:
-                        if m == "jmp" and op == "ax":
-                            yield ("end", "dispatch")
-                        elif m == "jmp" and op in popped:
-                            yield ("end", "return")
-                        elif m == "jmp":
-                            yield ("end", "indirect jump")
-                        else:
-                            yield ("end", "indirect call")
-                            pc = nxt
-                            continue
-                        break
-                    if m == "call":
-                        yield ("call", ("internal", seg, target), nxt)
-                        pc = nxt
-                        continue
-                    if m == "jmp":
-                        pc = target
-                        continue
-                    work.append(target)
-                pc = nxt
-
     def returns(self, seg, off, _stack=None):
-        """True when some path of the routine at seg:off returns to its caller."""
+        """True when some path of the routine at seg:off returns to its caller
+        (ret/retf, `jmp reg` through a popped return address, or a path the
+        walk cannot follow). Paths ending in the next-token dispatch do not."""
         key = (seg, off)
         if key in self._returns:
             return self._returns[key]
-        stack = _stack or set()
+        stack = _stack if _stack is not None else set()
         if key in stack:
             return True
         stack.add(key)
         result = False
-        for edge in self.edges(seg, off):
+        for edge in self._routine(seg, off, stack=stack):
             if edge[0] == "end" and edge[1] in ("return", "indirect jump", "indirect call", "undecodable"):
                 result = True
                 break
-            if edge[0] == "tail" and edge[1] and edge[1][0] == "internal" and self.returns(edge[1][1], edge[1][2], stack):
+            if edge[0] == "tail" and edge[1] and edge[1][0] == "internal" and edge[1][1] != 0xFF \
+                    and self.returns(edge[1][1], edge[1][2], stack):
                 result = True
                 break
+        stack.discard(key)
         self._returns[key] = result
         return result
 
     def reach(self, seg, off):
-        """({(module, ordinal): call depth}, Counter of path ends) reachable from seg:off."""
+        """({(module, ordinal): call depth}, Counter of path ends) reachable from seg:off.
+
+        The AH value a caller loaded is carried into its callees: DOS routines
+        are often shared, with each entry loading the function number into AH
+        and the shared body passing it down (VBRUN300's ChDir/MkDir/RmDir).
+        """
         imports, ends = {}, collections.Counter()
-        seen, frontier, steps = set(), [(seg, off)], 0
+        seen, frontier, steps = set(), [(seg, off, None)], 0
         for depth in range(self.max_depth + 1):
             nxt = []
-            for s, o in frontier:
-                if (s, o) in seen or steps > self.budget:
+            for s, o, hint in frontier:
+                if (s, o, hint) in seen or steps > self.budget:
                     continue
-                seen.add((s, o))
-                for edge in self._routine(s, o):
+                seen.add((s, o, hint))
+                for edge in self._routine(s, o, hint):
                     steps += 1
                     if edge[0] == "int":
                         imports.setdefault((f"INT{edge[1]:02X}h", edge[2]), depth)
@@ -329,49 +319,61 @@ class Walker:
                     elif edge[1][0] == "import":
                         mod = self.img.modules.get(edge[1][1], str(edge[1][1]))
                         key = (mod, edge[1][2])
-                        if key == ("KERNEL", DOS3CALL) and len(edge) > 3:
-                            key = ("DOS3CALL", edge[3])    # INT 21h function in AH
+                        if key == ("KERNEL", DOS3CALL):
+                            ah = edge[3] if len(edge) > 3 and edge[3] is not None else hint
+                            key = ("DOS3CALL", ah)    # INT 21h function in AH
                         imports.setdefault(key, depth + (1 if edge[0] == "call" else 0))
                     elif edge[1][0] == "internal" and edge[1][1] != 0xFF:
-                        (nxt if edge[0] == "call" else frontier).append((edge[1][1], edge[1][2]))
+                        ah = edge[3] if len(edge) > 3 and edge[3] is not None else hint
+                        (nxt if edge[0] in ("call", "callback") else frontier).append((edge[1][1], edge[1][2], ah))
+                        if edge[0] == "callback":
+                            ends["callback"] += 1
             frontier = nxt
         return imports, ends
 
-    def _routine(self, seg, start):
-        """Edges of a routine, continuing after a call only when the callee returns."""
-        seen, work = set(), [start]
+    def _routine(self, seg, start, ah=None, stack=None):
+        """Edges of a routine, continuing after a call only when the callee
+        returns. stack guards the returns() recursion against cycles."""
+        seen, work = set(), [(start, ah)]
         while work:
-            pc = work.pop()
-            for edge in self._linear(seg, pc, seen):
+            pc, ah = work.pop()
+            for edge in self._linear(seg, pc, seen, ah):
                 if edge[0] == "call" and edge[1] and edge[1][0] == "internal" and edge[1][1] == seg:
                     helper = self.inline_helper(seg, edge[1][2])
                     if helper is not None:
                         kind, reader = helper
                         fn = self.runtime_function(seg, edge[2], reader)
                         if fn is not None:
-                            yield ("call", ("internal", fn[0], fn[1]), None)
+                            yield ("call", ("internal", fn[0], fn[1]), None, edge[3])
                             if kind == "returns":
-                                work.append(edge[2] + fn[2])
+                                work.append((edge[2] + fn[2], edge[3]))
                         break
                 if edge[0] == "call":
                     yield edge
                     tgt = edge[1]
-                    if tgt and tgt[0] == "internal" and tgt[1] != 0xFF and not self.returns(tgt[1], tgt[2]):
+                    if tgt and tgt[0] == "internal" and tgt[1] != 0xFF and not self.returns(tgt[1], tgt[2], stack):
                         break
-                    work.append(edge[2])
+                    work.append((edge[2], edge[3]))
                     break
                 if edge[0] == "branch":
-                    work.append(edge[1])
+                    work.append((edge[1], edge[2]))
+                    continue
+                if edge[0] == "callback":
+                    yield edge
                     continue
                 yield edge
                 if edge[0] in ("end", "tail"):
                     break
 
-    def _linear(self, seg, pc, seen):
+    def _linear(self, seg, pc, seen, ah=None):
         popped = set()
-        ah = None   # DOS function number most recently loaded into AH
-        while (seg, pc) not in seen:
-            seen.add((seg, pc))
+        pushed_segment = None   # segment whose selector the previous instruction pushed
+        bound = None            # last `cmp bx, N` (a jump-table bound check)
+        # ah: DOS function number most recently loaded into AH (or inherited)
+        # Paths are distinguished by the AH they carry: shared DOS call sites
+        # are reached with different function numbers.
+        while (seg, pc, ah) not in seen:
+            seen.add((seg, pc, ah))
             ins = self._decode(seg, pc)
             if ins is None:
                 yield ("end", "undecodable")
@@ -380,11 +382,28 @@ class Walker:
             nxt = pc + ins.size
             if m == "pop":
                 popped.add(op)
+            # push <selector fixup> ; push <offset> builds a far pointer to a
+            # routine passed as an argument (called back by the callee).
+            if m == "push" and ins.size == 3:
+                fix = self.img.relocs(seg).get(pc + 1)
+                if fix and fix[0] == "internal" and fix[1] != 0xFF:
+                    pushed_segment = fix[1]
+                    pc = nxt
+                    continue
+                if pushed_segment is not None:
+                    yield ("callback", ("internal", pushed_segment, _imm(op)), None, ah)
+            pushed_segment = None
+            if m == "cmp" and op.startswith("bx, "):
+                bound = _imm(op[4:])
             if m == "mov" and op.startswith("ah, "):
                 ah = _imm(op[4:])
             elif m == "mov" and op.startswith("ax, "):
                 imm = _imm(op[4:])
                 ah = imm >> 8 if imm is not None else None
+            elif m in ("inc", "dec") and op == "ah" and ah is not None:
+                ah = (ah + (1 if m == "inc" else -1)) & 0xFF
+            elif m in ("add", "sub") and op.startswith("ah, ") and ah is not None and _imm(op[4:]) is not None:
+                ah = (ah + (_imm(op[4:]) if m == "add" else -_imm(op[4:]))) & 0xFF
             elif m == "int":
                 yield ("int", _imm(op), ah)
             if m in RETURNS:
@@ -399,46 +418,126 @@ class Walker:
                     target = int(op, 16) & 0xFFFF
                 except ValueError:
                     if m == "jmp":
-                        yield ("end", "dispatch" if op == "ax" else "return" if op in popped else "indirect jump")
+                        table = self._jump_table(seg, op, bound)
+                        if table:
+                            for target in table:
+                                yield ("branch", target, ah)
+                            return
+                        kind = "dispatch" if op == "ax" else "return" if op in popped else "indirect jump"
+                        yield ("end", kind, seg, pc, op)
                         return
                     yield ("end", "indirect call")
                     pc = nxt
                     continue
                 if m == "call":
-                    yield ("call", ("internal", seg, target), nxt)
+                    yield ("call", ("internal", seg, target), nxt, ah)
                     return
                 if m == "jmp":
                     pc = target
                     continue
-                yield ("branch", target)
+                yield ("branch", target, ah)
             pc = nxt
 
 
-def main(argv):
-    vbrun, program_json = argv[0], argv[1]
-    ghidra = argv[2] if len(argv) > 2 else ""
+DOS_FUNCTIONS = {
+    0x0E: "select-disk", 0x19: "get-disk", 0x1A: "set-dta", 0x25: "set-vector", 0x2A: "get-date",
+    0x2B: "set-date", 0x2C: "get-time", 0x2D: "set-time", 0x2F: "get-dta", 0x30: "get-version",
+    0x35: "get-vector", 0x36: "disk-free", 0x39: "mkdir", 0x3A: "rmdir", 0x3B: "chdir", 0x3C: "create",
+    0x3D: "open", 0x3E: "close", 0x3F: "read", 0x40: "write", 0x41: "delete", 0x42: "seek",
+    0x43: "attributes", 0x44: "ioctl", 0x45: "dup", 0x47: "getcwd", 0x4C: "exit", 0x4E: "findfirst",
+    0x4F: "findnext", 0x56: "rename", 0x57: "file-time", 0x59: "extended-error", 0x5C: "lock",
+    0x0D: "disk-reset",
+}
+MAP_SCHEMA = "ghidra-vb3/runtime-map-v1"
+SHARED_FRACTION = 0.25
+UNRESOLVED = ("indirect jump", "indirect call", "undecodable", "unrelocated far")
+
+
+def call_entry(key, depth, names):
+    """Map entry for a reached import, DOS function or interrupt."""
+    kind, value = key
+    if kind in ("DOS3CALL", "INT21h"):
+        fn = DOS_FUNCTIONS.get(value, f"{value:#04x}") if value is not None else "unknown"
+        return {"name": f"DOS.{fn}", "via": "KERNEL.DOS3CALL" if kind == "DOS3CALL" else "INT 21h",
+                "dos_function": value, "depth": depth}
+    if kind.startswith("INT"):
+        return {"name": f"{kind}.{value if value is not None else 'unknown'}", "depth": depth}
+    name = names.get(key)
+    return {"name": f"{kind}.{name or '#' + str(value)}", "module": kind, "ordinal": value, "depth": depth}
+
+
+def program_tokens(path):
+    """{token: keyword} used by a VB3 EXE or a DisassembleVB3PCode --json file."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:1] == b"{":
+        prog = json.loads(data)
+        return {t["token"]: t["keyword"].strip() for p in prog["procedures"] for t in p.get("tokens", ())}, prog["target"]["sha256"]
+    import hashlib
+    import importlib.util
+    script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ghidra_scripts", "DisassembleVB3PCode.py")
+    spec = importlib.util.spec_from_file_location("vb3pcode", script)
+    vb3 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vb3)
+    analysis, err = vb3.analyze(data, os.path.dirname(script), [])
+    if analysis is None:
+        raise SystemExit(f"{path}: {err}")
+    return {r["tok"]: r["kw"].strip() for _, _, recs in analysis["procs"] for r in recs}, hashlib.sha256(data).hexdigest()
+
+
+def build_map(vbrun, programs, ghidra=None, max_depth=8):
+    import hashlib
     img = NeImage(vbrun)
     names = win16_names(ghidra) if ghidra else {}
     seg = img.interpreter_segment()
-    prog = json.load(open(program_json))
-    tokens = {}
-    for proc in prog["procedures"]:
-        for t in proc.get("tokens", ()):
-            tokens.setdefault(t["token"], t["keyword"].strip())
-    walker = Walker(img)
-    out = {}
-    for tok, kw in sorted(tokens.items()):
-        imports, ends = walker.reach(seg, tok)
-        out[tok] = (kw, imports, ends)
-    counts = collections.Counter(imp for _, imps, _ in out.values() for imp in imps)
-    shared = {imp for imp, n in counts.items() if n > 0.25 * len(out)}
-    return out, shared, names
+    tokens, sources = {}, []
+    for path in programs:
+        toks, sha = program_tokens(path)
+        tokens.update(toks)
+        sources.append({"path": os.path.abspath(path), "sha256": sha})
+    walker = Walker(img, max_depth=max_depth, budget=400000)
+    reached = {tok: walker.reach(seg, tok) for tok in sorted(tokens)}
+    entries = {tok: [call_entry(k, d, names) for k, d in imps.items()] for tok, (imps, _) in reached.items()}
+    reaching = [tok for tok, calls in entries.items() if calls]
+    counts = collections.Counter(c["name"] for tok in reaching for c in entries[tok])
+    shared = {n for n, k in counts.items() if k > SHARED_FRACTION * max(len(reaching), 1)}
+    return {
+        "schema": MAP_SCHEMA,
+        "tool": {"name": "ghidra-vb3 vbrun_map"},
+        "runtime": {"path": os.path.abspath(vbrun), "size": len(img.d), "sha256": hashlib.sha256(img.d).hexdigest()},
+        "interpreter_segment": seg,
+        "max_depth": max_depth,
+        "shared_fraction": SHARED_FRACTION,
+        "programs": sources,
+        "shared": sorted(shared),
+        "tokens": {
+            f"{tok:#06x}": {
+                "keyword": tokens[tok],
+                "calls": sorted(({**c, "shared": c["name"] in shared} for c in entries[tok]),
+                                key=lambda c: (c["depth"], c["name"])),
+                "unresolved": {k: n for k, n in reached[tok][1].items() if k in UNRESOLVED},
+            }
+            for tok in sorted(tokens)
+        },
+    }
+
+
+def main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(description="Map VB3 p-code tokens to the Win16/DOS calls they reach.")
+    ap.add_argument("vbrun", help="VBRUN300.DLL")
+    ap.add_argument("programs", nargs="+", help="VB3 EXEs or DisassembleVB3PCode.py --json files")
+    ap.add_argument("-o", "--output", default="vbrun-map.json")
+    ap.add_argument("--ghidra", default=os.environ.get("GHIDRA_INSTALL_DIR"),
+                    help="Ghidra installation, for Win16 ordinal names (default $GHIDRA_INSTALL_DIR)")
+    ap.add_argument("--max-depth", type=int, default=8)
+    args = ap.parse_args(argv)
+    result = build_map(args.vbrun, args.programs, args.ghidra, args.max_depth)
+    with open(args.output, "w") as f:
+        json.dump(result, f, indent=1)
+    mapped = sum(1 for t in result["tokens"].values() if t["calls"])
+    print(f"{args.output}: {len(result['tokens'])} tokens, {mapped} reach a call, {len(result['shared'])} shared")
 
 
 if __name__ == "__main__":
-    out, shared, names = main(sys.argv[1:])
-    print(f"{len(out)} tokens, {len(shared)} shared imports")
-    for tok, (kw, imps, ends) in sorted(out.items(), key=lambda kv: kv[1][0]):
-        own = sorted(((d, f"{m}.{names.get((m, o), o)}") for (m, o), d in imps.items() if (m, o) not in shared))
-        if own:
-            print(f"{tok:#06x} {kw:<14} " + ", ".join(f"{n}@{d}" for d, n in own[:8]))
+    main(sys.argv[1:])

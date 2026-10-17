@@ -49,6 +49,7 @@ if typing.TYPE_CHECKING:
     from ghidra.ghidra_builtins import *
 
 import struct
+import json
 import os
 import sys
 
@@ -1983,11 +1984,14 @@ def _fmt_token(rec, subs=None):
     ann = f" [{names}]" if names else ""
     expr = rec.get("expr")
     tail = f"  ; {expr}" if expr and _is_operator(rec) else ""
+    runtime = rec.get("runtime_calls")
+    if runtime:
+        tail += "  => " + ", ".join(runtime[:TOKEN_RUNTIME_CALLS]) + (", ..." if len(runtime) > TOKEN_RUNTIME_CALLS else "")
     indent = "  " * rec.get("level", 0)
     return f"{indent}{rec['kw']:<10} np={rec['np']:>2} {p}{extra}{ann}{tail}".rstrip()
 
 
-def _plate(seg_label, i, recs, subs, callers, variables=None):
+def _plate(seg_label, i, recs, subs, callers, variables=None, background=()):
     sub = subs.proc_sub(recs) if subs else None
     lines = []
     if sub is not None:
@@ -2000,10 +2004,13 @@ def _plate(seg_label, i, recs, subs, callers, variables=None):
         lines.append("Called from: " + ", ".join(f"{c:#x}" for c in sorted(callers[sub.idx])))
     if variables is not None:
         lines += _declarations(variables, recs[0]["off"])
+    reached = proc_runtime_calls(recs, background)
+    if reached:
+        lines.append("Reaches: " + ", ".join(reached[:PROC_RUNTIME_CALLS]) + (", ..." if len(reached) > PROC_RUNTIME_CALLS else ""))
     return sub, "\n".join(lines)
 
 
-def annotate(program, base_addr, all_procs, subs, callers, variables=None):
+def annotate(program, base_addr, all_procs, subs, callers, variables=None, background=()):
     from ghidra.program.model.symbol import RefType, SourceType
     listing = program.getListing()
     addr_space = program.getAddressFactory().getDefaultAddressSpace()
@@ -2013,7 +2020,7 @@ def annotate(program, base_addr, all_procs, subs, callers, variables=None):
     for seg_label, procs in all_procs:
         for i, recs in enumerate(procs):
             addr = addr_space.getAddress(base_addr + recs[0]["off"])
-            sub, plate = _plate(seg_label, i, recs, subs, callers, variables)
+            sub, plate = _plate(seg_label, i, recs, subs, callers, variables, background)
             label = subs.label(sub) if sub is not None else f"{seg_label}_proc_{i:04d}"
             cu = listing.getCodeUnitAt(addr)
             if cu:
@@ -2117,7 +2124,15 @@ def main():
     base_addr = min_addr.getOffset()
 
     search_dirs = [os.path.dirname(str(program.getExecutablePath() or "")), vbdis_dir]
-    analysis, err = analyze(data, vbdis_dir, search_dirs)
+    map_path = _find_file(search_dirs, RUNTIME_MAP_FILE)
+    runtime_map = None
+    if map_path:
+        try:
+            runtime_map = load_runtime_map(map_path)
+            println(f"Runtime map: {map_path}")
+        except (OSError, ValueError) as e:
+            println(f"Ignoring runtime map: {e}")
+    analysis, err = analyze(data, vbdis_dir, search_dirs, runtime_map, map_path)
     if analysis is not None:
         subs, callers = analysis["subs"], analysis["callers"]
         variables = analysis["variables"]
@@ -2160,7 +2175,8 @@ def main():
         return
 
     println(f"Annotating {total_procs} procedures ...")
-    n, refs = annotate(program, base_addr, all_procs, subs, callers, variables)
+    background = analysis["runtime_map"]["background"] if analysis and analysis["runtime_map"] else ()
+    n, refs = annotate(program, base_addr, all_procs, subs, callers, variables, background)
     println(f"Done: annotated {n} procedures across {len(all_procs)} segment(s), {refs} call references.")
 
 
@@ -2168,10 +2184,89 @@ def main():
 # Command line (outside Ghidra)
 # ---------------------------------------------------------------------------
 
-def analyze(data, tables_dir, search_dirs=()):
+RUNTIME_MAP_SCHEMA = "ghidra-vb3/runtime-map-v1"
+RUNTIME_MAP_FILE = "vbrun-map.json"
+TOKEN_RUNTIME_CALLS = 3      # nearest calls shown on a token's EOL comment
+PROC_RUNTIME_CALLS = 8       # nearest calls shown on a procedure's plate
+BACKGROUND_FRACTION = 1 / 3  # calls more procedures reach are left out of summaries
+# Operand and statement-boundary tokens: statement starts, variable and
+# constant pushes, conversions, separators and generic method/property
+# dispatch. Their handlers run on every statement or for any object, so the
+# calls they reach describe the runtime, not the statement.
+PLUMBING_KEYWORDS = {
+    "nl", "eos", ":", "lab", "eol", "eom", "#", ",", "pop.", "met", "v0", "exe", "C<typ>",
+    "var", "var=", "var()", "var()=", "pop.var", "pop.var=", "pop.var()", "pop.var()=",
+    "c%", "c&", "c!", "c#", "c@", "c$",
+}
+
+
+def load_runtime_map(path):
+    """A tools/vbrun_map.py map, or ValueError."""
+    with open(path) as f:
+        runtime_map = json.load(f)
+    if runtime_map.get("schema") != RUNTIME_MAP_SCHEMA:
+        raise ValueError(f"runtime map {path}: expected schema {RUNTIME_MAP_SCHEMA}, got {runtime_map.get('schema')!r}")
+    return runtime_map
+
+
+def apply_runtime_map(procs, runtime_map):
+    """Set rec['runtime_calls'] to the non-shared calls a token's handler
+    reaches, nearest first, and return the program's background calls: those
+    more than BACKGROUND_FRACTION of its procedures reach, which procedure
+    summaries leave out."""
+    calls = {}
+    for tok, entry in runtime_map["tokens"].items():
+        own = sorted((c for c in entry["calls"] if not c["shared"]), key=lambda c: (c["depth"], c["name"]))
+        if own:
+            calls[int(tok, 16)] = own
+    per_proc = []
+    for recs in procs:
+        names = set()
+        for rec in recs:
+            if rec["tok"] in calls and (rec.get("kw") or "").strip() not in PLUMBING_KEYWORDS:
+                rec["runtime_calls"] = [c["name"] for c in calls[rec["tok"]]]
+                rec["runtime_depths"] = {c["name"]: c["depth"] for c in calls[rec["tok"]]}
+                names.update(rec["runtime_calls"])
+        per_proc.append(names)
+    counts = {}
+    for names in per_proc:
+        for n in names:
+            counts[n] = counts.get(n, 0) + 1
+    return sorted(n for n, k in counts.items() if k > BACKGROUND_FRACTION * max(len(procs), 1))
+
+
+def runtime_map_info(runtime_map, path, models, background=()):
+    """Where the map came from, whether it was made from this VBRUN300.DLL,
+    and the calls left out of procedure summaries as background."""
+    if runtime_map is None:
+        return None
+    matches = None
+    if models.vbrun_path:
+        import hashlib
+        with open(models.vbrun_path, "rb") as f:
+            matches = hashlib.sha256(f.read()).hexdigest() == runtime_map["runtime"]["sha256"]
+    return {"path": os.path.abspath(path) if path else None, "sha256": runtime_map["runtime"]["sha256"],
+            "max_depth": runtime_map.get("max_depth"), "matches_vbrun300": matches,
+            "background": list(background)}
+
+
+def proc_runtime_calls(recs, background=()):
+    """Distinct runtime calls of a procedure's tokens, nearest first, without
+    the program's background calls."""
+    depth = {}
+    for rec in recs:
+        for name, d in rec.get("runtime_depths", {}).items():
+            if name not in background:
+                depth[name] = min(d, depth.get(name, d))
+    return sorted(depth, key=lambda n: (depth[n], n))
+
+
+def analyze(data, tables_dir, search_dirs=(), runtime_map=None, runtime_map_path=None):
     """Decode an NE EXE. Returns (analysis dict, None) or (None, error string).
 
     search_dirs are searched for VBRUN300.DLL and the project's .VBX files.
+    runtime_map, from tools/vbrun_map.py, annotates tokens with the Win16 and
+    DOS calls their handlers reach.
     """
     segments, err = parse_ne_segments(data)
     if segments is None:
@@ -2191,10 +2286,12 @@ def analyze(data, tables_dir, search_dirs=()):
     apply_slot_names(subs, disasm, flat, slot_names(globals_, forms))
     variables = VariableTable(subs, disasm, flat)
     simulate(subs, disasm, flat, variables)
+    background = apply_runtime_map(flat, runtime_map) if runtime_map is not None else []
     return {
         "segments": segments, "regions": regions, "subs": subs, "disasm": disasm,
         "procs": procs, "calls": calls, "callers": callers, "forms": forms, "models": models,
         "variables": variables,
+        "runtime_map": runtime_map_info(runtime_map, runtime_map_path, models, background),
     }, None
 
 
@@ -2285,6 +2382,8 @@ def _token_json(rec):
         out["ref"] = rec["ref"]
     if rec.get("var") is not None:
         out["variable"] = rec["var"].id
+    if rec.get("runtime_calls"):
+        out["runtime_calls"] = rec["runtime_calls"]
     if rec.get("callee") is not None:
         out["callee"] = rec["callee"].idx
     elif rec.get("kw") in CALL_KEYWORDS:
@@ -2326,6 +2425,8 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
             "calls": calls,
             "callers": sorted(callers.get(owner.idx, ())) if owner is not None else [],
             "variables": sorted(v.id for v in by_proc.get(recs[0]["off"], ())),
+            "runtime_calls": (proc_runtime_calls(recs, analysis["runtime_map"]["background"])
+                              if analysis["runtime_map"] else None),
         }
         used_vars.update(proc["variables"])
         if tokens:
@@ -2359,6 +2460,7 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
             "vbx": analysis["models"].vbx_paths,
             "warnings": analysis["models"].warnings,
         },
+        "runtime_map": analysis["runtime_map"],
         "forms": [_form_json(f) for f in analysis["forms"]],
         "subs": sub_list,
         "variables": [_variable_json(v) for v in sorted(analysis["variables"].vars.values(), key=lambda v: v.id)
@@ -2384,7 +2486,6 @@ def to_json(analysis, exe_path, tables_dir, proc_offset=None, tokens=True):
 
 def cli(argv):
     import argparse
-    import json
     ap = argparse.ArgumentParser(description="Disassemble VB3 p-code from an NE EXE.")
     ap.add_argument("exe")
     ap.add_argument("--tables", default=os.path.dirname(os.path.abspath(__file__)),
@@ -2396,13 +2497,20 @@ def cli(argv):
     ap.add_argument("--summary", action="store_true", help="with --json, omit per-token records")
     ap.add_argument("--vbx-dir", action="append", default=[],
                     help="directory to search for VBRUN300.DLL and .VBX files before the EXE's own")
+    ap.add_argument("--runtime-map", help=f"{RUNTIME_MAP_SCHEMA} file from tools/vbrun_map.py")
     ap.add_argument("--version", action="version", version=f"ghidra-vb3 {__version__}")
     args = ap.parse_args(argv)
 
     with open(args.exe, "rb") as f:
         data = f.read()
     search_dirs = args.vbx_dir + [os.path.dirname(os.path.abspath(args.exe))]
-    analysis, err = analyze(data, args.tables, search_dirs)
+    runtime_map = None
+    if args.runtime_map:
+        try:
+            runtime_map = load_runtime_map(args.runtime_map)
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"runtime map: {e}")
+    analysis, err = analyze(data, args.tables, search_dirs, runtime_map, args.runtime_map)
     if analysis is None:
         if args.json:
             json.dump({"schema": JSON_SCHEMA, "error": {"code": "not-ne", "message": err}}, sys.stdout)
@@ -2428,7 +2536,8 @@ def cli(argv):
     for label, i, recs in analysis["procs"]:
         if args.proc is not None and not (recs[0]["off"] <= args.proc < recs[-1]["end"]):
             continue
-        _, plate = _plate(label, i, recs, subs, callers, analysis["variables"])
+        background = analysis["runtime_map"]["background"] if analysis["runtime_map"] else ()
+        _, plate = _plate(label, i, recs, subs, callers, analysis["variables"], background)
         print("\n".join(f"; {line}" for line in plate.splitlines()))
         for rec in recs:
             print(f"{rec['off']:#08x}: {_fmt_token(rec, subs)}")

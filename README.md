@@ -57,6 +57,43 @@ recovered (53 recorded, 4 inferred); `tests/score_types.py` reports it.
 Scope is intentionally limited to **opcode + params per token**, with call
 resolution and light structuring on top. It does not reconstruct VB source.
 
+### Runtime calls
+
+`tools/vbrun_map.py` maps the p-code tokens a program uses to the Win16 and
+DOS functions their handlers in `VBRUN300.DLL` can reach, so statements show
+what they do at the system level (`Kill` reaches `DOS.delete`, `Shell`
+`KERNEL.WINEXEC`, `MsgBox` `USER.MESSAGEBOX`, `InputBox$` the
+`USER.DIALOGBOXPARAM` family):
+
+```bash
+python3 tools/vbrun_map.py VBRUN300.DLL APP.EXE -o vbrun-map.json --ghidra "$GHIDRA_INSTALL_DIR"
+python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --runtime-map vbrun-map.json
+```
+
+In Ghidra, put `vbrun-map.json` next to the imported EXE. Token comments then
+end with `=> USER.MESSAGEBOX, ...` and each plate lists `Reaches:` with the
+procedure's nearest calls. Calls reached by more than a third of a program's
+procedures (lazy DLL loading behind `Declare` calls, shared painting paths)
+are left out of plates as background and listed in the JSON.
+
+How it works: a p-code token is the near offset of its handler in the
+runtime's interpreter segment, and every handler ends by dispatching the next
+token with `es: lodsw ; jmp ax`. The tool walks each handler's code with
+[capstone](https://www.capstone-engine.org/), following NE relocations, the
+runtime's inline runtime-function dispatch tables (parsed from its own code),
+bounded jump tables and far pointers passed as callbacks, and names DOS
+services by the AH function given to `DOS3Call`. Ordinals are named from
+Ghidra's `data/symbols/win16/*.exports`.
+
+The results are static reachability: a handler may reach a function on some
+path, which does not mean every execution calls it, and paths through
+unresolved indirect jumps are missed (each token counts them). Checked against
+`tests/vb3/stmts` (114 statements compiled with VB3, using VBRUN300 3.0.5.38),
+30 of 32 statements with a known Win16/DOS behaviour reach it. Not reached
+yet: `Open` (its open/create routine is reached through a jump via a variable)
+and `Load` (window creation only beyond the default depth). The tool needs
+`pip install capstone`; it is not needed for anything else.
+
 ## Requirements
 
 - Ghidra 11.x with PyGhidra enabled
@@ -116,7 +153,12 @@ python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --proc 0x13966   # 
   callee Sub index, `null` when unresolved), `callers`, `variables` (ids), and unless
   `--summary`, `tokens`
   (`offset`, `size`, `token`, `keyword`, `params` hex, `level`, and when known `int`,
-  `string`, `var`, `ref`, `variable`, `callee`, `expr`).
+  `string`, `var`, `ref`, `variable`, `callee`, `expr`, `runtime_calls`).
+- `runtime_map` (with `--runtime-map`): the map's path and runtime SHA-256, its depth,
+  whether it was made from the `VBRUN300.DLL` found (`matches_vbrun300`, `null` when
+  none was found) and the program's `background` calls. Procedures then carry
+  `runtime_calls` (nearest first, without background; `null` without a map) and tokens
+  `runtime_calls` (all non-shared calls, nearest first).
 - `coverage`: totals versus returned counts, the number of unresolved calls, and variables
   by type source.
 
@@ -128,8 +170,10 @@ the encoding VB3 used. Input that is not an NE executable produces
 ### Tests
 
 ```bash
-python3 -m unittest discover -s tests                         # unit tests
+python3 -m unittest discover -s tests                         # unit and ground-truth tests
 VB3_SAMPLE=/path/to/APP.EXE python3 -m unittest discover -s tests   # plus sample checks
+VB3_VBX_DIR=/dir/with/VBRUN300.DLL GHIDRA_INSTALL_DIR=/path/to/ghidra \
+  python3 -m unittest discover -s tests                       # plus event names and runtime-call checks
 ```
 
 ## Background

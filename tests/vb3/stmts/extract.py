@@ -3,8 +3,8 @@
 Usage: python3 tests/vb3/stmts/extract.py STMTS.EXE [--json OUT]
 
 For each case procedure, the statement's tokens are those not in the baseline
-case (which only assigns the marker) and not operand plumbing (variable
-references, constants, conversions). Each token is shown with the keyword the
+case (which only assigns the marker) and not operand plumbing
+(DisassembleVB3PCode.PLUMBING_KEYWORDS). Each token is shown with the keyword the
 VBDIS3 token table gives it, and checked against the keyword the case expects.
 """
 import importlib.util
@@ -15,7 +15,6 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 SCRIPT = os.path.join(ROOT, "ghidra_scripts", "DisassembleVB3PCode.py")
 EXPECTED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expected.json")
-PLUMBING = {"var", "var=", "var()", "var()=", "pop.var", "c%", "c&", "c!", "c#", "c$", "C<typ>", "nl", "eos", "exe"}
 
 
 def norm(keyword):
@@ -46,7 +45,7 @@ def main(argv):
         if tokens is None:
             report[name] = {"status": "missing"}
             continue
-        own = [(t, k) for t, k in tokens if t not in base and k.strip() not in PLUMBING]
+        own = [(t, k) for t, k in tokens if t not in base and k.strip() not in vb3.PLUMBING_KEYWORDS]
         want = expected[name]
         match = want is not None and any(norm(k) == norm(want) for _, k in own)
         status = "match" if match else ("unlabelled" if want is None else "differs")
