@@ -126,7 +126,7 @@ class VbrunMapTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("vb3", SCRIPT)
         vb3 = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(vb3)
-        analysis, _ = vb3.analyze(open(STMTS_EXE, "rb").read(), os.path.dirname(SCRIPT), [])
+        analysis, _ = vb3.analyze(vb3.read_bytes(STMTS_EXE), os.path.dirname(SCRIPT), [])
         cls.case_tokens = {}
         for _, _, recs in analysis["procs"]:
             marker = next((r["str"][5:].decode() for r in recs if r["str"] and r["str"].startswith(b"CASE ")), None)
@@ -150,7 +150,8 @@ class VbrunMapTest(unittest.TestCase):
 
     def test_map_identifies_its_runtime(self):
         import hashlib
-        self.assertEqual(self.map["runtime"]["sha256"], hashlib.sha256(open(VBRUN, "rb").read()).hexdigest())
+        with open(VBRUN, "rb") as f:
+            self.assertEqual(self.map["runtime"]["sha256"], hashlib.sha256(f.read()).hexdigest())
 
 
 if __name__ == "__main__":

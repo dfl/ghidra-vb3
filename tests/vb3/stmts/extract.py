@@ -27,7 +27,7 @@ def main(argv):
     spec = importlib.util.spec_from_file_location("vb3", SCRIPT)
     vb3 = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(vb3)
-    analysis, err = vb3.analyze(open(exe, "rb").read(), os.path.dirname(SCRIPT), [])
+    analysis, err = vb3.analyze(vb3.read_bytes(exe), os.path.dirname(SCRIPT), [])
     if analysis is None:
         raise SystemExit(err)
     expected = json.load(open(EXPECTED))["cases"]

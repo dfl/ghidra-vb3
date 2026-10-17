@@ -63,6 +63,11 @@ JSON_SCHEMA = "ghidra-vb3/disassembly-v1"
 FLAG_SIZE = 10837  # VBDIS_FlagTokenSize
 
 
+def read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
 class Token9Bit:
     __slots__ = ("m2d1c", "m2d22", "keyword_str_idx")
 
@@ -73,7 +78,7 @@ class Token9Bit:
 
 
 def _load_i_dat(path):
-    raw = open(path, "rb").read()
+    raw = read_bytes(path)
     str_len = struct.unpack_from("<h", raw, 0)[0]
     off = 2
     tokens = []
@@ -88,7 +93,7 @@ def _load_i_dat(path):
 
 
 def _load_x_dat(path, vb_ver=3):
-    raw = open(path, "rb").read()
+    raw = read_bytes(path)
     ver_raw = struct.unpack_from("<h", raw, 0)[0]
     ver_check = ver_raw ^ (vb_ver * 0x100)
     assert ver_check == 2, f"VBDIS3 version mismatch (got {ver_check}); wrong dat file?"
@@ -464,7 +469,7 @@ def _ne_data_segments(data):
 
 def load_vbrun(path):
     """(standard props, standard events, {default name: Model}) from VBRUN300.DLL, or None."""
-    data = open(path, "rb").read()
+    data = read_bytes(path)
     for seg in _ne_data_segments(data):
         std_props = _find_std_table(seg, STD_PROP_COUNT, STD_PROP_ANCHOR, _prop_info_at,
                                     lambda: Prop("", 0))
@@ -485,7 +490,7 @@ def load_vbrun(path):
 def load_vbx(path, std_props, std_events):
     """{lower-case class name: Model} registered by a .VBX, newest VB3-usable version."""
     best = {}
-    for seg in _ne_data_segments(open(path, "rb").read()):
+    for seg in _ne_data_segments(read_bytes(path)):
         for m in _scan_models(seg, std_props, std_events, require_class=True):
             if m.version not in VBX_MODEL_VERSIONS:
                 continue

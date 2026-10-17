@@ -49,7 +49,8 @@ RETURNS = ("ret", "retf", "iret")
 
 class NeImage:
     def __init__(self, path):
-        d = self.d = open(path, "rb").read()
+        with open(path, "rb") as f:
+            d = self.d = f.read()
         ne = struct.unpack_from("<H", d, 0x3C)[0]
         st = ne + struct.unpack_from("<H", d, ne + 0x22)[0]
         sh = struct.unpack_from("<H", d, ne + 0x32)[0]
@@ -108,7 +109,8 @@ def win16_names(ghidra_root):
     """{(MODULE, ordinal): NAME} from Ghidra's bundled win16 .exports files."""
     names = {}
     for path in glob.glob(os.path.join(ghidra_root, "Ghidra/Features/Base/data/symbols/win16/*.exports")):
-        text = open(path, encoding="latin1").read()
+        with open(path, encoding="latin1") as f:
+            text = f.read()
         lib = re.search(r'<LIBRARY NAME="([^"]+)"', text)
         mod = os.path.splitext(lib.group(1))[0].upper() if lib else os.path.basename(path).split(".")[0].upper()
         for ordinal, name in re.findall(r'ORDINAL="(\d+)" NAME="([^"]+)"', text):
