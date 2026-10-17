@@ -1528,6 +1528,11 @@ def infer_declare_params(calls, arg_bytes):
 TOK_EXTERN_ARG_BYTES = 0x67EA   # operand: argument bytes the call pushes
 TOK_BYVAL_STRING = 0x1972       # converts the string on the stack to a ByVal C string
 TOK_BYVAL = (0x6A63, 0x6A02)
+# Store the value on the stack in a frame temporary of the parameter's type and
+# pass the temporary by reference (constants and expressions passed to ByRef
+# parameters). Types from the values and conversions that precede them.
+TEMP_REFERENCE_TYPES = {0x6AD5: "Integer", 0x6AC5: "Long", 0x6AB5: "Double", 0x6AAB: "", 0x6A63: "String"}
+ARG_BYTES = {"Integer": 2, "Long": 4, "Single": 4, "Double": 8, "Currency": 8}
 ALT_UNARY_MINUS = 0x00F9
 CTL_KIND_ADDRESS = 8
 CTL_MODE_VALUE4 = 14            # 4-byte value of a local, not its address
@@ -1544,7 +1549,8 @@ COERCION_SOURCES = {
     0x0EB0: "Integer", 0x0F1C: "Long", 0x10F1: "Single", 0x1102: "Double",
     0x1156: "Currency", 0x11C3: "String",
 }
-CONST_TYPES = {"c%": "Integer", "c&": "Long", "c!": "Single", "c#": "Double", "c@": "Currency", "c$": "String"}
+CONST_TYPES = {"c%": "Integer", "c&": "Long", "c!": "Single", "c#": "Double", "c@": "Currency", "c$": "String",
+               "True": "Integer", "False": "Integer"}
 STRING_FUNCS = {"LCase$", "UCase$", "Mid$", "Left$", "Right$", "Chr$", "String$", "Space$",
                 "Format$", "Trim$", "Hex$", "Oct$", "Str$"}
 ARITH_OPS = {"+", "-", "*", "/", "\\", "Mod", "=", "<>", "<", ">", "<=", ">=",
@@ -1577,6 +1583,8 @@ CTL_KIND_CALL = 12
 STRING_TYPE_CODE = 7   # (flag token >> 10) & 7 of a String reference
 GLOBAL_ARRAY_ELEMENT = 0xC000
 STRING_ARG_FUNCS = {"Len": 1, "Asc": 1, "Mid$": 0, "Left$": 0, "Right$": 0, "InStr": 0}
+# Statements whose one operand is a String (a Variant operand is converted first)
+STRING_STATEMENTS = {"ChDrive", "ChDir", "MkDir", "RmDir", "Kill"}
 
 
 def _signed(w):
@@ -1756,11 +1764,12 @@ class VariableTable:
 
 
 class _StackItem:
-    __slots__ = ("typ", "coerced", "by_ref", "c_string", "var", "long_literal")
+    __slots__ = ("typ", "coerced", "by_ref", "c_string", "var", "long_literal", "reference")
 
     def __init__(self, typ="", by_ref=False, var=None):
         self.typ, self.coerced, self.by_ref, self.c_string = typ, None, by_ref, False
         self.var, self.long_literal = var, False
+        self.reference = by_ref   # refers to the variable itself (its address, or a ByRef parameter's pointer)
 
     @property
     def value_type(self):
@@ -1780,7 +1789,7 @@ def simulate(subs, disasm, procs, variables):
     Declare parameter lists from the arguments each call pushes, and variable
     types from use. Run after build_call_graph."""
     calls = {}
-    local_args = {}   # callee sub index -> [[arg value types]]
+    local_args = {}   # callee sub index -> [[arg stack items]]
     for recs in procs:
         stack = []
         arg_bytes = -1
@@ -1802,6 +1811,8 @@ def simulate(subs, disasm, procs, variables):
             elif tok == TOK_BYVAL_STRING:
                 if stack:
                     stack[-1].c_string = True
+                    if stack[-1].var is not None and stack[-1].coerced is None:
+                        stack[-1].var.infer("String", "byval-string-argument")
             elif kw in ("var()", "call"):
                 nargs = words[0] if words else 0
                 take = min(nargs, len(stack)) if nargs < 0x8000 else 0
@@ -1815,7 +1826,7 @@ def simulate(subs, disasm, procs, variables):
                     calls[callee.idx][1].append(arg_bytes)
                     arg_bytes = -1
                 elif callee is not None:
-                    local_args.setdefault(callee.idx, []).append([a.value_type for a in args])
+                    local_args.setdefault(callee.idx, []).append(args)
                 if callee is not None:
                     stack.append(_StackItem(callee.returns if not callee.is_sub else ""))
                 else:
@@ -1829,7 +1840,9 @@ def simulate(subs, disasm, procs, variables):
                 mode = disasm.control_token[tok] if tok < len(disasm.control_token) else 0
                 kind = disasm.control_token[tok + 1] if tok + 1 < len(disasm.control_token) else 0
                 if kind == CTL_KIND_ADDRESS:
-                    stack.append(_StackItem(by_ref=mode != CTL_MODE_VALUE4, var=var))
+                    item = _StackItem(by_ref=mode != CTL_MODE_VALUE4, var=var)
+                    item.reference = item.by_ref or (var is not None and var.storage == "param")
+                    stack.append(item)
                 elif 1 <= kind <= 7:
                     stack.append(_StackItem(DATA_TYPES[kind], var=var))
                 else:
@@ -1853,6 +1866,10 @@ def simulate(subs, disasm, procs, variables):
                     "String" if value.typ == "String" else "")
                 if var is not None and typed and kw.startswith("var="):
                     var.infer(typed, "assign")
+            elif tok in TEMP_REFERENCE_TYPES:
+                if stack:
+                    stack[-1] = _StackItem(TEMP_REFERENCE_TYPES[tok])
+                    stack[-1].reference = True
             elif tok in TOK_BYVAL:
                 pass
             elif kw == "&":
@@ -1880,6 +1897,10 @@ def simulate(subs, disasm, procs, variables):
             elif kw in STRING_FUNCS:
                 if stack:
                     stack[-1] = _StackItem("String")
+            elif kw in STRING_STATEMENTS:
+                item = pop()
+                if item.var is not None and item.coerced is None:
+                    item.var.infer("String", f"{kw}-argument")
     for idx, (arg_lists, nbytes) in calls.items():
         subs.subs[idx].params = infer_declare_params(arg_lists, nbytes)
     _apply_parameter_evidence(subs, variables, local_args)
@@ -1902,13 +1923,58 @@ def _apply_parameter_evidence(subs, variables, local_args):
                     v.name = name
                     v.infer(typ, "event-signature")
             continue
-        calls = local_args.get(sub.idx, [])
-        if params and calls and all(len(c) == len(params) for c in calls):
-            for i, v in enumerate(params):
-                for c in calls:
-                    v.infer(c[i], "call-site-argument")
-            if sub.params is None:
+        for c in local_args.get(sub.idx, []):
+            for a, v in _bind_arguments(c, params) or ():
+                v.infer(a.value_type, "call-site-argument")
+    _propagate_byref_types(subs, variables, local_args)
+    for sub in subs.subs.values():
+        start = subs.code_start(sub)
+        calls = local_args.get(sub.idx)
+        if sub.params is None and start is not None and calls:
+            params = variables.params(start)
+            if params and all(len(c) == len(params) for c in calls):
                 sub.params = [f"{v.name} As {v.type or 'Variant'}" for v in params]
+
+
+def _bind_arguments(args, params):
+    """Pair a call's arguments with the callee's referenced parameters, or None.
+    By position when every parameter is referenced; otherwise by frame offset
+    (Pascal convention: the last argument is at bp+6, and each argument takes 4
+    bytes when passed by reference, else its value's size)."""
+    if len(args) == len(params):
+        return list(zip(args, params))
+    sizes = [4 if a.reference else ARG_BYTES.get(a.value_type) for a in args]
+    if None in sizes:
+        return None
+    frame, at = 6, {}
+    for a, size in zip(reversed(args), reversed(sizes)):
+        at[frame] = a
+        frame += size
+    if all(v.frame in at for v in params):
+        return [(at[v.frame], v) for v in params]
+    return None
+
+
+def _propagate_byref_types(subs, variables, local_args):
+    """A variable passed by reference has its parameter's type: VB3 rejects a
+    ByRef argument of another type and passes other values in a temporary.
+    Iterates because a type can travel through chains of pass-through
+    parameters."""
+    links = []
+    for idx, calls in local_args.items():
+        start = subs.code_start(subs.subs[idx])
+        params = variables.params(start) if start is not None else []
+        for c in calls:
+            links += [(a.var, v) for a, v in _bind_arguments(c, params) or ()
+                      if a.var is not None and a.reference and a.coerced is None and not a.var.array]
+    changed = True
+    while changed:
+        changed = False
+        for arg, param in links:
+            for a, b in ((arg, param), (param, arg)):
+                if a.type and not b.type:
+                    b.infer(a.type, "byref-parameter")
+                    changed = True
 
 
 # ---------------------------------------------------------------------------

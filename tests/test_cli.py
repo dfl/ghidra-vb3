@@ -132,6 +132,37 @@ class ConversionTest(unittest.TestCase):
                           0x1156: "Currency", 0x11C3: "String"})
 
 
+class BindArgumentsTest(unittest.TestCase):
+    def param(self, frame):
+        v = vb3.Variable(("frame", 0, frame), "param", frame)
+        v.frame = frame
+        return v
+
+    def item(self, typ="", reference=False):
+        it = vb3._StackItem(typ)
+        it.reference = reference
+        return it
+
+    def test_pairs_by_position_when_every_parameter_is_referenced(self):
+        args = [self.item("Integer"), self.item(reference=True)]
+        params = [self.param(10), self.param(6)]
+        self.assertEqual(vb3._bind_arguments(args, params), list(zip(args, params)))
+
+    def test_pairs_by_frame_offset_past_an_unreferenced_parameter(self):
+        # Sub s(ByVal a As Integer, b, c): b at bp+6+4 is never referenced.
+        a, b, c = self.item("Integer"), self.item(reference=True), self.item(reference=True)
+        pa, pc = self.param(14), self.param(6)
+        self.assertEqual(vb3._bind_arguments([a, b, c], [pa, pc]), [(a, pa), (c, pc)])
+
+    def test_unknown_argument_size_leaves_the_call_unbound(self):
+        args = [self.item(), self.item(reference=True)]
+        self.assertIsNone(vb3._bind_arguments(args, [self.param(6)]))
+
+    def test_true_and_false_are_integer_operands(self):
+        # A missing push shifted every later argument of the call.
+        self.assertEqual((vb3.CONST_TYPES["True"], vb3.CONST_TYPES["False"]), ("Integer", "Integer"))
+
+
 class FormRecordTest(unittest.TestCase):
     @staticmethod
     def record(ctrl_id, type_id, body=b"\xff\xff\x00"):

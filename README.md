@@ -40,8 +40,11 @@ never mixed silently:
 - **inferred** (shown with `~`): usage rules, each named in the JSON evidence:
   the source type of a conversion applied to the variable's value, scalar
   assignments through an explicit conversion or of a String, `Len`/`Asc`/
-  `Mid$`/`Left$`/`Right$`/`InStr` arguments, comparisons with Long literals,
-  event signatures and call-site argument types (mostly from vb3dec).
+  `Mid$`/`Left$`/`Right$`/`InStr` arguments, `ChDrive`/`ChDir`/`MkDir`/
+  `RmDir`/`Kill` operands, strings passed `ByVal` to DLLs, comparisons with
+  Long literals, event signatures, call-site argument types (mostly from
+  vb3dec), and ByRef arguments, which VB3 requires to have their parameter's
+  type (propagated in both directions through pass-through parameters).
 
 Disagreeing evidence is reported as a conflict; no evidence leaves the type
 unknown (`?`) rather than defaulting to Variant. `Static` locals and module
