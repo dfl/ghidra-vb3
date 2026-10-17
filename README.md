@@ -145,9 +145,11 @@ python3 ghidra_scripts/DisassembleVB3PCode.py APP.EXE --json --proc 0x13966   # 
 - `forms`: each form's `name`, `file_name`, code `module` and `controls` (`id`, `name`,
   `type`, `array_index`), with decoding `warnings`.
 - `variables`: `id`, `name`, `storage` (`local`, `param`, `module`, `global`), `module`,
-  `slot`, `frame`, `slot_word`, `global_offset`, `array`, `bounds`, `type`, `type_source`
-  (`recorded`, `inferred`, `conflict` or `null`), `evidence` (recorded types with
-  reference counts, inferred types with rule names) and `procedures`.
+  `slot`, `frame`, `slot_word`, `global_offset`, `array`, `bounds`, `max_bytes` (frame
+  bytes up to the next variable, an upper bound on a non-array local's size, e.g. a
+  user-defined type), `type`, `type_source` (`recorded`, `inferred`, `conflict` or
+  `null`), `evidence` (recorded types with reference counts, inferred types with rule
+  names) and `procedures`.
 - `subs`: the Sub table (`index`, `kind`, `local`, `module`, `segment`, `code_start`,
   `code_end`, `lib`, `alias`, `name`, `returns`, `params` (`null` when unknown), `event`
   (`owner`, `event`, `slot`; `event` is `null` when the control's model is missing),

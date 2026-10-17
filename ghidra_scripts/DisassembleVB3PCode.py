@@ -1620,7 +1620,7 @@ def array_descriptor(mod, slot):
 
 class Variable:
     __slots__ = ("id", "key", "storage", "slot", "slot_word", "module", "frame", "global_offset",
-                 "array", "bounds", "recorded", "inferred", "procs", "name")
+                 "array", "bounds", "recorded", "inferred", "procs", "name", "max_bytes")
 
     def __init__(self, key, storage, slot, module=None, frame=None, global_offset=None, slot_word=None):
         self.id = None
@@ -1628,6 +1628,7 @@ class Variable:
         self.frame, self.global_offset, self.slot_word = frame, global_offset, slot_word
         self.array = False
         self.bounds = None     # [(lower, upper)] per dimension, when recorded
+        self.max_bytes = None  # frame bytes up to the next variable: an upper bound on the size
         self.recorded = {}     # type -> reference count
         self.inferred = {}     # type -> set of rule names
         self.procs = set()
@@ -1693,6 +1694,11 @@ class VariableTable:
                     elem, v.bounds = desc
                     if elem:
                         v.record(elem)
+        for vs in self.by_proc.values():
+            frames = sorted((v for v in vs if v.storage == "local" and v.frame is not None), key=lambda v: v.frame)
+            for v, above in zip(frames, frames[1:]):
+                if not v.array:   # an array's frame slot holds its descriptor
+                    v.max_bytes = above.frame - v.frame
         for i, v in enumerate(sorted(self.vars.values(), key=lambda v: str(v.key)), 1):
             v.id = i
 
@@ -2056,6 +2062,8 @@ def _declarations(variables, start):
             array = f"({dims})"
         if v.storage == "local":
             where = f"  ' bp-{-v.frame:#x}" if v.frame is not None else ""
+            if v.type is None and v.max_bytes is not None:
+                where += f", at most {v.max_bytes} bytes"
             lines.append(f"Dim {v.name}{array} As {_type_text(v)}{where}")
         elif v.storage == "module" and v.procs == {start}:
             # Static locals and module variables share module data; only this
@@ -2442,6 +2450,7 @@ def _variable_json(v):
         "global_offset": v.global_offset,
         "array": v.array,
         "bounds": [list(b) for b in v.bounds] if v.bounds else None,
+        "max_bytes": v.max_bytes,
         "type": v.type,
         "type_source": v.type_source,
         "evidence": {

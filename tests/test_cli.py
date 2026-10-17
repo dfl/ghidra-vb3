@@ -362,6 +362,14 @@ class GroundTruthTypesTest(unittest.TestCase):
         result = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_frame_extent_bounds_each_local(self):
+        sizes = {"Integer": 2, "Long": 4, "Single": 4, "Double": 8, "Currency": 8, "Variant": 16}
+        out = json.loads(run(TYPES_EXE, "--json").stdout)
+        bounded = [v for v in out["variables"] if v["max_bytes"] is not None and v["type"] in sizes]
+        self.assertTrue(bounded)
+        for v in bounded:
+            self.assertEqual(v["max_bytes"], sizes[v["type"]], v["name"])
+
 
 if __name__ == "__main__":
     unittest.main()
