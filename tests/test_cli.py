@@ -208,6 +208,14 @@ class SignatureTest(unittest.TestCase):
         self.assertEqual({m["name"] for m in got.values()}, {"Short", "Long"})
 
 
+class StackEffectTest(unittest.TestCase):
+    def test_hex_literals_and_color_functions_have_their_types(self):
+        # Polaris passes &H...& literals, RGB() and QBColor() to SetTextColor's Long
+        # parameter: its calls push 6 bytes for (hdc, color).
+        self.assertEqual((vb3.CONST_TYPES["&Hc&"], vb3.CONST_TYPES["&Hc%"]), ("Long", "Integer"))
+        self.assertEqual(vb3.LONG_FUNCS, {"RGB": 3, "QBColor": 1})
+
+
 class FormRecordTest(unittest.TestCase):
     @staticmethod
     def record(ctrl_id, type_id, body=b"\xff\xff\x00"):

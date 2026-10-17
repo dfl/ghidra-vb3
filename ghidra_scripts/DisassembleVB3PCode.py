@@ -1557,7 +1557,9 @@ COERCION_SOURCES = {
     0x1156: "Currency", 0x11C3: "String",
 }
 CONST_TYPES = {"c%": "Integer", "c&": "Long", "c!": "Single", "c#": "Double", "c@": "Currency", "c$": "String",
-               "True": "Integer", "False": "Integer"}
+               "True": "Integer", "False": "Integer", "&Hc&": "Long", "&Hc%": "Integer"}
+LONG_LITERALS = {"c&", "&Hc&"}
+LONG_FUNCS = {"RGB": 3, "QBColor": 1}   # argument counts of functions returning Long
 STRING_FUNCS = {"LCase$", "UCase$", "Mid$", "Left$", "Right$", "Chr$", "String$", "Space$",
                 "Format$", "Trim$", "Hex$", "Oct$", "Str$"}
 ARITH_OPS = {"+", "-", "*", "/", "\\", "Mod", "=", "<>", "<", ">", "<=", ">=",
@@ -1904,7 +1906,7 @@ def simulate(subs, disasm, procs, variables):
                     stack.append(_StackItem("String" if (alt >> 10) & 7 == 7 else "", var=var))
             elif kw in CONST_TYPES:
                 item = _StackItem(CONST_TYPES[kw])
-                item.long_literal = kw == "c&"
+                item.long_literal = kw in LONG_LITERALS
                 stack.append(item)
             elif kw.startswith("var"):
                 # assignments: var=, var()= (array element, indices first). Only
@@ -1962,6 +1964,10 @@ def simulate(subs, disasm, procs, variables):
                 if text_index < len(args) and args[text_index].var is not None:
                     args[text_index].var.infer("String", f"{kw}-argument")
                 stack.append(_StackItem("Integer" if kw in ("Len", "Asc", "InStr") else "String"))
+            elif kw in LONG_FUNCS:
+                for _ in range(LONG_FUNCS[kw]):
+                    pop()
+                stack.append(_StackItem("Long"))
             elif kw in STRING_FUNCS:
                 if stack:
                     stack[-1] = _StackItem("String")
