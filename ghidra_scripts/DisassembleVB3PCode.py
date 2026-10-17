@@ -1855,6 +1855,9 @@ def simulate(subs, disasm, procs, variables):
             tok = rec["tok"]
             words = _words(rec)
             var = rec.get("var")
+            if kw in ("pop.var", "pop.var=") and stack and stack[-1].var is not None and not stack[-1].var.array:
+                # a property access applies to the object on the stack; VB3 Variants hold no objects
+                stack[-1].var.infer("Object", "property-object")
             if rec["str"] is not None:
                 stack.append(_StackItem("String"))
             elif rec["nib"] in (CASE_START, CASE_FINISH) or kw in ("nl", "eos"):

@@ -43,7 +43,8 @@ never mixed silently:
   assignments through an explicit conversion or of a String, `Len`/`Asc`/
   `Mid$`/`Left$`/`Right$`/`InStr` arguments, `ChDrive`/`ChDir`/`MkDir`/
   `RmDir`/`Kill` operands, strings passed `ByVal` to DLLs, comparisons with
-  Long literals, the typed `For`/`Next` and comparison tokens, event
+  Long literals, the typed `For`/`Next` and comparison tokens, objects whose
+  properties are accessed (VB3 Variants hold no objects), event
   signatures, call-site argument types (mostly from vb3dec), and ByRef
   arguments (including array elements), which VB3 requires to have their
   parameter's type (propagated in both directions through pass-through
