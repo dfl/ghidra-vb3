@@ -36,15 +36,18 @@ is the same in every module. Types come from two kinds of evidence, which are
 never mixed silently:
 
 - **recorded**: the data type each reference's control token says the opcode
-  accesses, array descriptors in module data, and `ReDim ... As` clauses;
+  accesses, the element type of array element tokens, array descriptors in
+  module data, and `ReDim ... As` clauses;
 - **inferred** (shown with `~`): usage rules, each named in the JSON evidence:
   the source type of a conversion applied to the variable's value, scalar
   assignments through an explicit conversion or of a String, `Len`/`Asc`/
   `Mid$`/`Left$`/`Right$`/`InStr` arguments, `ChDrive`/`ChDir`/`MkDir`/
   `RmDir`/`Kill` operands, strings passed `ByVal` to DLLs, comparisons with
-  Long literals, event signatures, call-site argument types (mostly from
-  vb3dec), and ByRef arguments, which VB3 requires to have their parameter's
-  type (propagated in both directions through pass-through parameters).
+  Long literals, the typed `For`/`Next` and comparison tokens, event
+  signatures, call-site argument types (mostly from vb3dec), and ByRef
+  arguments (including array elements), which VB3 requires to have their
+  parameter's type (propagated in both directions through pass-through
+  parameters).
 
 Disagreeing evidence is reported as a conflict; no evidence leaves the type
 unknown (`?`) rather than defaulting to Variant. `Static` locals and module
@@ -56,7 +59,8 @@ covering every type as a local, ByRef/ByVal parameter, `Static`, module-level
 and global variable, `ReDim` and `Static` arrays, a `Form` object, event
 parameters and usage-only cases. All 57 storage classes and types are
 recovered (53 recorded, 4 inferred); `tests/score_types.py` reports it.
-`tests/vb3/byref/` covers argument passing: the temporaries VB3 creates for
+`tests/vb3/usage/` covers `For` counters, array elements and comparisons (40
+variables, all recovered). `tests/vb3/byref/` covers argument passing: the temporaries VB3 creates for
 constants passed ByRef (one token per type), and 38 parameters that only
 argument passing types, all recovered.
 

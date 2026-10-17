@@ -18,6 +18,9 @@ VBX_DIR = os.environ.get("VB3_VBX_DIR")
 BYREF_EXE = os.path.join(ROOT, "tests", "vb3", "byref", "BYREF.EXE")
 if not os.path.exists(BYREF_EXE):
     BYREF_EXE = None
+USAGE_EXE = os.path.join(ROOT, "tests", "vb3", "usage", "USAGE.EXE")
+if not os.path.exists(USAGE_EXE):
+    USAGE_EXE = None
 
 spec = importlib.util.spec_from_file_location("vb3", SCRIPT)
 vb3 = importlib.util.module_from_spec(spec)
@@ -386,6 +389,16 @@ class GroundTruthByRefTest(unittest.TestCase):
         import score_types
         expected = os.path.join(ROOT, "tests", "vb3", "byref", "expected.json")
         wrong = [r for r in score_types.score(BYREF_EXE, expected) if r[1] != "ok"]
+        self.assertEqual(wrong, [])
+
+
+@unittest.skipUnless(USAGE_EXE, "tests/vb3/usage/USAGE.EXE not built (see tests/vb3/README.md)")
+class GroundTruthUsageTest(unittest.TestCase):
+    def test_usage_reveals_types(self):
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        import score_types
+        expected = os.path.join(ROOT, "tests", "vb3", "usage", "expected.json")
+        wrong = [r for r in score_types.score(USAGE_EXE, expected) if r[1] != "ok"]
         self.assertEqual(wrong, [])
 
 

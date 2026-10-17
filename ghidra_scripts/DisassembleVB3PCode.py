@@ -1578,6 +1578,25 @@ ARITH_OPS = {"+", "-", "*", "/", "\\", "Mod", "=", "<>", "<", ">", "<=", ">=",
 # type names the rule that produced it.
 # ---------------------------------------------------------------------------
 
+# Counter type of For and Next tokens (tests/vb3/usage; 0x1AE8, 0x1B37, 0x1C87 and
+# 0x1E08 from Polaris loops over counters of known type)
+FOR_COUNTER_TYPES = {0x1A7E: "Integer", 0x1AA6: "Long", 0x1AC8: "Single", 0x1AE2: "Double",
+                     0x1AE8: "Double", 0x1AFC: "Currency", 0x1B37: "Variant"}
+NEXT_COUNTER_TYPES = {0x1C87: "Integer", 0x1C8A: "Integer", 0x1D08: "Long", 0x1D63: "Single",
+                      0x1DA9: "Double", 0x1DCE: "Currency", 0x1E08: "Variant"}
+# Operand type of comparison tokens, from operands of recorded type in Polaris and
+# tests/vb3. Single and Double share their comparison tokens, so those are omitted.
+COMPARE_TYPES = {
+    0x396D: "Integer", 0x3980: "Integer", 0x3993: "Integer", 0x39A6: "Integer", 0x39B9: "Integer",
+    0x39CC: "Integer", 0x3B1E: "Long", 0x3B42: "Long", 0x3B51: "Long",
+    0x3DDB: "String", 0x3DE4: "String", 0x3DED: "String", 0x3DF6: "String", 0x3DFF: "String",
+    0x4468: "Variant", 0x447A: "Variant", 0x448C: "Variant", 0x44B0: "Variant",
+}
+ARRAY_ELEMENT_ADDRESS = 17   # flag_token2 code of untyped element tokens, which push the element's address
+# Element type of an array element access, from the second flag_token2 byte of
+# its token: 17 + VB type code, 28 for String (11 and 17 are untyped tokens).
+ARRAY_ELEMENT_TYPES = {18: "Integer", 19: "Long", 20: "Single", 21: "Double", 22: "Currency",
+                       23: "Variant", 28: "String"}
 CTL_MODE_LOCAL = 8
 CTL_MODE_MODULE = 9
 CTL_MODE_GLOBAL = 10
@@ -1672,6 +1691,22 @@ class VariableTable:
         self.subs, self.disasm = subs, disasm
         self.vars = {}
         self.by_proc = {}
+        # Global offsets referenced anywhere: an array header reference (ReDim,
+        # LBound, element addresses) whose module word is one of them is that
+        # global, and can precede the global's first direct reference.
+        self.global_words = set()
+        for recs in procs:
+            owner = subs.proc_sub(recs)
+            for rec in recs if owner is not None else ():
+                tok = rec["tok"]
+                if tok + 1 >= len(disasm.control_token) or rec.get("ref") or rec.get("callee") is not None:
+                    continue
+                slot = _var_slot(disasm, rec)
+                if (slot is not None and disasm.control_token[tok] == CTL_MODE_GLOBAL
+                        and disasm.control_token[tok + 1] != CTL_KIND_CALL):
+                    word = subs.globals.module_word(owner.module, slot)
+                    if word is not None:
+                        self.global_words.add(word)
         for recs in procs:
             owner = subs.proc_sub(recs)
             start = recs[0]["off"]
@@ -1734,9 +1769,8 @@ class VariableTable:
             v = self._get(("frame", start, slot), storage, slot, module=owner.module,
                           frame=frame, slot_word=word)
         elif mode == CTL_MODE_ARRAY_HEADER:
-            known = self.vars.get(("global", word))
-            if known is not None:
-                v = known
+            if word in self.global_words:
+                v = self._get(("global", word), "global", slot, global_offset=word)
             elif word is not None and _signed(word) < 0 and not word & 1:
                 v = self._get(("frame", start, slot), "local", slot, module=owner.module,
                               frame=_signed(word), slot_word=word)
@@ -1748,7 +1782,10 @@ class VariableTable:
             return None
         if kind == CTL_KIND_ARRAY:
             v.array = True
-            if v.storage == "global":
+            elem = ARRAY_ELEMENT_TYPES.get(self.disasm._ft2_lookup(tok)[1])
+            if elem:
+                v.record(elem)
+            elif v.storage == "global":
                 elem = self.subs.globals.module_word(owner.module, slot + 4)
                 if elem is not None and elem & GLOBAL_ARRAY_ELEMENT == GLOBAL_ARRAY_ELEMENT and DATA_TYPES.get(elem & 7):
                     v.record(DATA_TYPES[elem & 7])
@@ -1776,12 +1813,13 @@ class VariableTable:
 
 
 class _StackItem:
-    __slots__ = ("typ", "coerced", "by_ref", "c_string", "var", "long_literal", "reference")
+    __slots__ = ("typ", "coerced", "by_ref", "c_string", "var", "long_literal", "reference", "element")
 
     def __init__(self, typ="", by_ref=False, var=None):
         self.typ, self.coerced, self.by_ref, self.c_string = typ, None, by_ref, False
         self.var, self.long_literal = var, False
         self.reference = by_ref   # refers to the variable itself (its address, or a ByRef parameter's pointer)
+        self.element = False      # an array element's address
 
     @property
     def value_type(self):
@@ -1842,7 +1880,10 @@ def simulate(subs, disasm, procs, variables):
                 if callee is not None:
                     stack.append(_StackItem(callee.returns if not callee.is_sub else ""))
                 else:
-                    stack.append(_StackItem(var.type if var is not None else "", var=var))
+                    item = _StackItem(var.type if var is not None else "", var=var)
+                    if var is not None and var.array and disasm._ft2_lookup(tok)[1] == ARRAY_ELEMENT_ADDRESS:
+                        item.reference = item.element = True
+                    stack.append(item)
             elif kw == "C<typ>":
                 if stack:
                     if stack[-1].var is not None and tok in COERCION_SOURCES:
@@ -1893,11 +1934,25 @@ def simulate(subs, disasm, procs, variables):
                 if kw == "-" and alt & 0x1FF == ALT_UNARY_MINUS:
                     continue
                 rhs, lhs = pop(), pop()
+                if tok in COMPARE_TYPES:
+                    for item in (lhs, rhs):
+                        if item.var is not None and item.coerced is None:
+                            item.var.infer(COMPARE_TYPES[tok], "comparison")
                 if kw in ("=", "<>", "<", ">", "<=", ">="):
                     for a, b in ((lhs, rhs), (rhs, lhs)):
                         if b.long_literal and a.var is not None:
                             a.var.infer("Long", "compare-long-literal")
                 stack.append(_StackItem("String" if kw == "+" and rhs.typ == "String" else ""))
+            elif tok in FOR_COUNTER_TYPES:
+                # counter, start, limit: the counter is pushed first
+                counter = stack[0] if len(stack) >= 3 else None
+                if counter is not None and counter.var is not None:
+                    counter.var.infer(FOR_COUNTER_TYPES[tok], "for-counter")
+                stack.clear()
+            elif tok in NEXT_COUNTER_TYPES:
+                if stack and stack[-1].var is not None:
+                    stack[-1].var.infer(NEXT_COUNTER_TYPES[tok], "for-counter")
+                stack.clear()
             elif kw in STRING_ARG_FUNCS:
                 d = disasm.convert_token(tok)
                 nargs = STRING_ARG_FUNCS[kw] or max(d["bit_fwd2"] if d else 0, 2)
@@ -1978,7 +2033,7 @@ def _propagate_byref_types(subs, variables, local_args):
         params = variables.params(start) if start is not None else []
         for c in calls:
             links += [(a.var, v) for a, v in _bind_arguments(c, params) or ()
-                      if a.var is not None and a.reference and a.coerced is None and not a.var.array]
+                      if a.var is not None and a.reference and a.coerced is None and (a.element or not a.var.array)]
     changed = True
     while changed:
         changed = False

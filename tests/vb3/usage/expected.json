@@ -1,0 +1,193 @@
+{
+  "cases": {
+    "cmp_currency": {
+      "storage": "param",
+      "type": "Currency"
+    },
+    "cmp_double": {
+      "storage": "param",
+      "type": "Double"
+    },
+    "cmp_int": {
+      "storage": "param",
+      "type": "Integer"
+    },
+    "cmp_long": {
+      "storage": "param",
+      "type": "Long"
+    },
+    "cmp_single": {
+      "storage": "param",
+      "type": "Single"
+    },
+    "cmp_string": {
+      "storage": "param",
+      "type": "String"
+    },
+    "cmp_variant": {
+      "storage": "param",
+      "type": "Variant"
+    },
+    "elem_global_currency": {
+      "array": true,
+      "storage": "global",
+      "type": "Currency"
+    },
+    "elem_global_double": {
+      "array": true,
+      "storage": "global",
+      "type": "Double"
+    },
+    "elem_global_int": {
+      "array": true,
+      "storage": "global",
+      "type": "Integer"
+    },
+    "elem_global_long": {
+      "array": true,
+      "storage": "global",
+      "type": "Long"
+    },
+    "elem_global_single": {
+      "array": true,
+      "storage": "global",
+      "type": "Single"
+    },
+    "elem_global_string": {
+      "array": true,
+      "storage": "global",
+      "type": "String"
+    },
+    "elem_global_variant": {
+      "array": true,
+      "storage": "global",
+      "type": "Variant"
+    },
+    "elem_local_currency": {
+      "array": true,
+      "storage": "local",
+      "type": "Currency"
+    },
+    "elem_local_double": {
+      "array": true,
+      "storage": "local",
+      "type": "Double"
+    },
+    "elem_local_int": {
+      "array": true,
+      "storage": "local",
+      "type": "Integer"
+    },
+    "elem_local_long": {
+      "array": true,
+      "storage": "local",
+      "type": "Long"
+    },
+    "elem_local_single": {
+      "array": true,
+      "storage": "local",
+      "type": "Single"
+    },
+    "elem_local_string": {
+      "array": true,
+      "storage": "local",
+      "type": "String"
+    },
+    "elem_local_variant": {
+      "array": true,
+      "storage": "local",
+      "type": "Variant"
+    },
+    "elem_module_currency": {
+      "array": true,
+      "storage": "module",
+      "type": "Currency"
+    },
+    "elem_module_double": {
+      "array": true,
+      "storage": "module",
+      "type": "Double"
+    },
+    "elem_module_int": {
+      "array": true,
+      "storage": "module",
+      "type": "Integer"
+    },
+    "elem_module_long": {
+      "array": true,
+      "storage": "module",
+      "type": "Long"
+    },
+    "elem_module_single": {
+      "array": true,
+      "storage": "module",
+      "type": "Single"
+    },
+    "elem_module_string": {
+      "array": true,
+      "storage": "module",
+      "type": "String"
+    },
+    "elem_module_variant": {
+      "array": true,
+      "storage": "module",
+      "type": "Variant"
+    },
+    "elemref_currency": {
+      "array": true,
+      "storage": "module",
+      "type": "Currency"
+    },
+    "elemref_double": {
+      "array": true,
+      "storage": "module",
+      "type": "Double"
+    },
+    "elemref_int": {
+      "array": true,
+      "storage": "module",
+      "type": "Integer"
+    },
+    "elemref_long": {
+      "array": true,
+      "storage": "module",
+      "type": "Long"
+    },
+    "elemref_single": {
+      "array": true,
+      "storage": "module",
+      "type": "Single"
+    },
+    "elemref_string": {
+      "array": true,
+      "storage": "module",
+      "type": "String"
+    },
+    "elemref_variant": {
+      "array": true,
+      "storage": "module",
+      "type": "Variant"
+    },
+    "for_currency": {
+      "storage": "local",
+      "type": "Currency"
+    },
+    "for_double": {
+      "storage": "local",
+      "type": "Double"
+    },
+    "for_int": {
+      "storage": "local",
+      "type": "Integer"
+    },
+    "for_long": {
+      "storage": "local",
+      "type": "Long"
+    },
+    "for_single": {
+      "storage": "local",
+      "type": "Single"
+    }
+  },
+  "program": "USAGE.MAK"
+}
