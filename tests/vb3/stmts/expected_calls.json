@@ -125,7 +125,7 @@
     ]
   },
   "known_gaps": {
-    "load": "window creation is reached only beyond the default depth",
-    "open_output": "the open/create routine is reached through a jump via a variable (ss:[0x27a])"
+    "load": "CreateWindow is reached only at call depth 13, through a path 70 of 153 statement tokens share at that depth, so deeper walking does not identify it",
+    "open_output": "the open/create routine is reached through a jump via ss:[0x27a], a continuation word VBRUN300 sets to constant offsets (0x84F2, 0x7DB7, 0x86E3 in the interpreter segment); following them reaches OpenFile only at depth 12 through the shared error path (89 of 153 tokens), and adds 244 background calls"
   }
 }
