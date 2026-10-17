@@ -60,6 +60,6 @@ their type and all 38 parameters are recovered (2 before the ByRef rules).
 only their use shows: `For` counters of each numeric type, element stores and
 loads on local, module and global dynamic arrays of each type, array elements
 passed ByRef, and parameters compared with a literal. `usage/USAGE.EXE` is it
-compiled with VB3; all 40 are recovered (7 before the `For`, array element
+compiled with VB3; all 40 are recovered (18 before the `For`, array element
 and comparison rules) with `tests/score_types.py USAGE.EXE
 tests/vb3/usage/expected.json`.
