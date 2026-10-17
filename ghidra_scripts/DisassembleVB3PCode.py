@@ -2206,8 +2206,10 @@ def annotate(program, base_addr, all_procs, subs, callers, variables=None, backg
             sub, plate = _plate(seg_label, i, recs, subs, callers, variables, background, matches)
             label = subs.label(sub) if sub is not None else f"{seg_label}_proc_{i:04d}"
             match = (matches or {}).get(recs[0]["off"])
-            if match and match["match"] == "exact" and not (sub is not None and sub.event):
-                label = match["name"]
+            if match and match["match"] == "exact" and not (sub is not None and sub.event and sub.event[1]):
+                # an event procedure keeps its event name when the control model gave one
+                form = subs.module_names.get(sub.module) if sub is not None else None
+                label = f"{form}.{match['name']}" if form else match["name"]
             cu = listing.getCodeUnitAt(addr)
             if cu:
                 cu.setComment(cu.PLATE_COMMENT, plate)
