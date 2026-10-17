@@ -110,11 +110,10 @@ The results are static reachability: a handler may reach a function on some
 path, which does not mean every execution calls it, and paths through
 unresolved indirect jumps are missed (each token counts them). Checked against
 `tests/vb3/stmts` (114 statements compiled with VB3, using VBRUN300 3.0.5.38),
-30 of 32 statements with a known Win16/DOS behaviour reach it. Not reached
-yet: `Open` (its open/create routine is reached through a jump via a variable)
-and `Load` (window creation only beyond the default depth). Following the
-variable, and walking deeper, reaches both only through the runtime's shared
-error paths, which most statements also reach, so neither is reported. The tool
+31 of 32 statements with a known Win16/DOS behaviour reach it. Not reached
+yet: `Load`, whose window creation is in routines the walk never enters;
+walking deeper reaches it only through paths most statements share, so it is
+not reported. The tool
 needs `pip install capstone`; it is not needed for anything else.
 
 ### Library signatures

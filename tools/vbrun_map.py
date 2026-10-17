@@ -24,6 +24,9 @@ interpreter segment, whose handlers end by dispatching the next token with
   own code;
 - `push <selector> ; push <offset>` far pointers passed to callees are
   treated as possible callbacks;
+- `call word ptr [disp]` through a data word is followed to every constant
+  offset the segment's code stores in that word (`mov word ptr [disp], imm`):
+  VBRUN300's file I/O calls its channel routines this way;
 - DOS3Call (KERNEL.102) and INT 21h are named by the AH function, carried
   into callees when a caller loads it.
 
@@ -137,6 +140,7 @@ class Walker:
         self._returns = {}
         self._helpers = {}
         self._dispatch = None
+        self._pointers = {}
 
     def _follow_jumps(self, seg, pc, hops=4):
         """Address reached from pc through plain `mov`/`jmp` instructions."""
@@ -240,6 +244,21 @@ class Walker:
                 return None    # not a table of offsets in this segment
             targets.append(target)
         return targets
+
+    def pointer_targets(self, seg, op):
+        m = re.fullmatch(r"word ptr (?:[sd]s:)?\[(0x[0-9a-f]+)\]", op)
+        if not m:
+            return None
+        if seg not in self._pointers:
+            code, stores = self.img.code(seg), collections.defaultdict(set)
+            for st in re.finditer(rb"\xc7\x06", code):
+                at = st.start() + 2
+                if at + 4 <= len(code):
+                    disp, imm = struct.unpack_from("<HH", code, at)
+                    if imm < len(code):
+                        stores[disp].add(imm)
+            self._pointers[seg] = stores
+        return sorted(self._pointers[seg].get(int(m.group(1), 16), ())) or None
 
     def runtime_function(self, seg, ret, reader):
         """(segment, offset, operand bytes) of the routine named inline at ret."""
@@ -428,6 +447,13 @@ class Walker:
                         kind = "dispatch" if op == "ax" else "return" if op in popped else "indirect jump"
                         yield ("end", kind, seg, pc, op)
                         return
+                    if m == "call":
+                        targets = self.pointer_targets(seg, op)
+                        if targets:
+                            for target in targets:
+                                yield ("callback", ("internal", seg, target), None, ah)
+                            pc = nxt
+                            continue
                     yield ("end", "indirect call")
                     pc = nxt
                     continue
