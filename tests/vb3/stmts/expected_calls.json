@@ -125,6 +125,6 @@
     ]
   },
   "known_gaps": {
-    "load": "CreateWindow is called from three VBRUN300 routines (segments 9, 30 and 52) that the walk from Load's handlers never enters; walking deeper reaches CreateWindow only through paths about half of all statement tokens share"
+    "load": "CreateWindow is 13 calls deep: 25:4AA7 > 25:4AE9 > 25:4B76 > 25:81A4 > 62:01E8 > 47:0028 > 40:0000 > 40:0264 > 30:0D2C > 24:01F8 > 48:03EE > 48:040C > 30:0988 > 30:052E > CreateWindow. At that depth about half of all statement tokens reach CreateWindow too, so it is shared background and static reachability cannot attribute it to Load. VBRUN300's other two CreateWindow routines (9:0000, 52:0000) have no caller chain to Load's walk within 8 calls."
   }
 }

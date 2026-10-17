@@ -111,9 +111,9 @@ path, which does not mean every execution calls it, and paths through
 unresolved indirect jumps are missed (each token counts them). Checked against
 `tests/vb3/stmts` (114 statements compiled with VB3, using VBRUN300 3.0.5.38),
 31 of 32 statements with a known Win16/DOS behaviour reach it. Not reached
-yet: `Load`, whose window creation is in routines the walk never enters;
-walking deeper reaches it only through paths most statements share, so it is
-not reported. The tool
+yet: `Load`, whose window creation is 13 calls deep in the runtime; at that
+depth about half of all statements reach `CreateWindow` too, so it is shared
+background and not reported. The tool
 needs `pip install capstone`; it is not needed for anything else.
 
 ### Library signatures
